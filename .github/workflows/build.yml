@@ -1,3 +1,4 @@
+
 name: Build Real APK
 
 on:
@@ -7,6 +8,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -14,110 +16,193 @@ jobs:
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
+          distribution: temurin
           java-version: '17'
 
-      - name: Generate Android Project and Build APK
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.0'
+
+      - name: Create Android Project
         run: |
           mkdir -p myapp/app/src/main/assets
           mkdir -p myapp/app/src/main/java/com/app/builder
-          mkdir -p myapp/app/src/main/res/values
 
-          # Manifest File
-          cat << 'EOF' > myapp/app/src/main/AndroidManifest.xml
-          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-              package="com.app.builder">
-              <uses-permission android:name="android.permission.INTERNET" />
+      - name: Copy Actual Project Files
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          event = json.load(open(os.environ["GITHUB_EVENT_PATH"]))
+          files = event.get("client_payload", {}).get("files")
+
+          if not isinstance(files, dict) or not files:
+              raise SystemExit("ERROR: No project files received.")
+
+          root = Path("myapp/app/src/main/assets").resolve()
+          count = 0
+
+          def write_files(obj, prefix=""):
+              global count
+
+              for name, value in obj.items():
+                  if not isinstance(name, str):
+                      raise ValueError("Invalid file name")
+
+                  relative = (Path(prefix) / name).as_posix()
+
+                  if relative.startswith("/") or ".." in Path(relative).parts:
+                      raise ValueError("Unsafe file path: " + relative)
+
+                  if isinstance(value, dict):
+                      write_files(value, relative)
+                  elif isinstance(value, str):
+                      target = (root / relative).resolve()
+
+                      if root not in target.parents and target != root:
+                          raise ValueError("Unsafe file path")
+
+                      target.parent.mkdir(parents=True, exist_ok=True)
+                      target.write_text(value, encoding="utf-8")
+                      count += 1
+                  else:
+                      raise ValueError("Invalid content for: " + relative)
+
+          write_files(files)
+
+          if not (root / "index.html").is_file():
+              raise SystemExit("ERROR: Project must contain root index.html")
+
+          print("Successfully copied", count, "project files.")
+          PY
+
+      - name: Create Android Manifest
+        run: |
+          cat > myapp/app/src/main/AndroidManifest.xml <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET"/>
               <application
-                  android:label="${{ github.event.client_payload.appName }}"
-                  android:usesCleartextTraffic="true"
-                  android:theme="@android:style/Theme.NoTitleBar">
+                  android:label="My Web App"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar"
+                  android:usesCleartextTraffic="true">
                   <activity
                       android:name=".MainActivity"
                       android:exported="true">
                       <intent-filter>
-                          <action android:name="android.intent.action.MAIN" />
-                          <category android:name="android.intent.category.LAUNCHER" />
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
                       </intent-filter>
                   </activity>
               </application>
           </manifest>
           EOF
 
-          # MainActivity
-          cat << 'EOF' > myapp/app/src/main/java/com/app/builder/MainActivity.java
+      - name: Create MainActivity
+        run: |
+          cat > myapp/app/src/main/java/com/app/builder/MainActivity.java <<'EOF'
           package com.app.builder;
+
+          import android.app.Activity;
           import android.os.Bundle;
           import android.webkit.WebView;
           import android.webkit.WebViewClient;
-          import android.app.Activity;
+          import android.webkit.WebChromeClient;
+          import android.webkit.WebSettings;
 
           public class MainActivity extends Activity {
               @Override
               protected void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
+
                   WebView webView = new WebView(this);
-                  webView.getSettings().setJavaScriptEnabled(true);
-                  webView.getSettings().setDomStorageEnabled(true);
+
+                  WebSettings settings = webView.getSettings();
+                  settings.setJavaScriptEnabled(true);
+                  settings.setDomStorageEnabled(true);
+                  settings.setAllowFileAccess(true);
+
                   webView.setWebViewClient(new WebViewClient());
+                  webView.setWebChromeClient(new WebChromeClient());
                   webView.loadUrl("file:///android_asset/index.html");
+
                   setContentView(webView);
+              }
+
+              @Override
+              public void onBackPressed() {
+                  WebView webView = (WebView) findViewById(android.R.id.content)
+                      .getRootView();
+
+                  super.onBackPressed();
               }
           }
           EOF
 
-          # Gradle Settings & Configs
-          echo "include ':app'" > myapp/settings.gradle
+      - name: Create Gradle Settings
+        run: |
+          cat > myapp/settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
 
-          cat << 'EOF' > myapp/app/build.gradle
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+
+          rootProject.name = 'MyWebApp'
+          include ':app'
+          EOF
+
+      - name: Create Root Gradle File
+        run: |
+          cat > myapp/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.1.0' apply false
+          }
+          EOF
+
+      - name: Create App Gradle File
+        run: |
+          cat > myapp/app/build.gradle <<'EOF'
           plugins {
               id 'com.android.application'
           }
+
           android {
-              compileSdk 34
               namespace 'com.app.builder'
+              compileSdk 34
+
               defaultConfig {
-                  applicationId "com.app.builder"
+                  applicationId 'com.app.builder'
                   minSdk 21
                   targetSdk 34
                   versionCode 1
-                  versionName "1.0"
+                  versionName '1.0'
               }
           }
           EOF
 
-          cat << 'EOF' > myapp/build.gradle
-          buildscript {
-              repositories {
-                  google()
-                  mavenCentral()
-              }
-              dependencies {
-                  classpath 'com.android.tools.build:gradle:8.1.0'
-              }
-          }
-          allprojects {
-              repositories {
-                  google()
-                  mavenCentral()
-              }
-          }
-          EOF
-
-          # Link Runner Built-in SDK
-          echo "sdk.dir=$ANDROID_HOME" > myapp/local.properties
-
-          # Assets
-          echo "<!DOCTYPE html><html><head><title>App</title></head><body style='background:#111;color:white;text-align:center;padding-top:50px;'><h1>Cloud Build Successful!</h1></body></html>" > myapp/app/src/main/assets/index.html
-
-          # Build Execution
+      - name: Build APK
+        run: |
           cd myapp
           gradle wrapper --gradle-version 8.0
           chmod +x gradlew
           ./gradlew assembleDebug
 
-      - name: Upload APK Artifact
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: real-working-apk
           path: myapp/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
