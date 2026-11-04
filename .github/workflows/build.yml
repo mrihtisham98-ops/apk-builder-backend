@@ -17,8 +17,27 @@ jobs:
           distribution: 'temurin'
           java-version: '11'
 
-      - name: Create App and Build APK Directly
+      - name: Setup Android SDK and Build APK
         run: |
+          # 1. Setup Android SDK manually
+          export ANDROID_SDK_ROOT=$HOME/android-sdk
+          mkdir -p $ANDROID_SDK_ROOT/cmdline-tools
+          
+          echo "Downloading Android SDK Command-line Tools..."
+          wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O cmdtools.zip
+          unzip -q cmdtools.zip -d $ANDROID_SDK_ROOT/cmdline-tools
+          mv $ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools $ANDROID_SDK_ROOT/cmdline-tools/latest
+          
+          # Add to path
+          export PATH=$PATH:$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools
+          
+          # Accept licenses automatically
+          yes | sdkmanager --licenses || true
+          
+          echo "Installing platforms and build-tools..."
+          sdkmanager "platform-tools" "platforms;android-33" "build-tools;33.0.2"
+
+          # 2. Create Project Structure
           mkdir -p myapp/app/src/main/assets
           mkdir -p myapp/app/src/main/java/com/app/builder
           mkdir -p myapp/app/src/main/res
@@ -104,10 +123,13 @@ jobs:
           }
           EOF
 
+          # local.properties pointing to SDK
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > myapp/local.properties
+
           # Sample index.html inside assets
           echo "<!DOCTYPE html><html><head><title>App</title></head><body style='background:#111;color:white;text-align:center;padding-top:50px;'><h1>Hello from Cloud App!</h1></body></html>" > myapp/app/src/main/assets/index.html
 
-          # Download and setup Gradle directly
+          # 3. Build APK with Gradle
           cd myapp
           wget -q https://services.gradle.org/distributions/gradle-7.5-bin.zip
           unzip -q gradle-7.5-bin.zip
