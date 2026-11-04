@@ -1,0 +1,30 @@
+name: Build APK
+
+on:
+  repository_dispatch:
+    types: [build_apk]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Set up JDK
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Build placeholder APK
+        run: |
+          echo "Building APK for ${{ github.event.client_payload.appName }}"
+          mkdir -p build/output
+          echo "Dummy APK Content" > build/output/app-release.apk
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: generated-apk
+          path: build/output/app-release.apk
