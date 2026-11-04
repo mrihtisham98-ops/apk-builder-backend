@@ -17,12 +17,7 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Setup Gradle (Caching Disabled)
-        uses: gradle/actions/setup-gradle@v3
-        with:
-          cache-disabled: true
-
-      - name: Create Minimal Android App Structure
+      - name: Create App and Build APK Directly
         run: |
           mkdir -p myapp/app/src/main/assets
           mkdir -p myapp/app/src/main/java/com/app/builder
@@ -112,13 +107,13 @@ jobs:
           # Sample index.html inside assets
           echo "<!DOCTYPE html><html><head><title>App</title></head><body style='background:#111;color:white;text-align:center;padding-top:50px;'><h1>Hello from Cloud App!</h1></body></html>" > myapp/app/src/main/assets/index.html
 
-          # Initialize gradle wrapper so gradlew is created successfully
+          # Download and setup Gradle directly
           cd myapp
+          wget -q https://services.gradle.org/distributions/gradle-7.5-bin.zip
+          unzip -q gradle-7.5-bin.zip
+          export PATH=$PWD/gradle-7.5/bin:$PATH
+          
           gradle wrapper --gradle-version 7.5
-
-      - name: Build APK with Gradle Wrapper
-        working-directory: ./myapp
-        run: |
           chmod +x gradlew
           ./gradlew assembleDebug
 
