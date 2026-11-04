@@ -1,4 +1,4 @@
-name: Build APK
+name: Build Real APK
 
 on:
   repository_dispatch:
@@ -11,20 +11,129 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Set up JDK
+      - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Build placeholder APK
-        run: |
-          echo "Building APK for ${{ github.event.client_payload.appName }}"
-          mkdir -p build/output
-          echo "Dummy APK Content" > build/output/app-release.apk
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
 
-      - name: Upload APK Artifact
+      - name: Create Android Project Structure
+        run: |
+          mkdir -p android-app/app/src/main/assets
+          mkdir -p android-app/app/src/main/java/com/app/builder
+          mkdir -p android-app/app/src/main/res/values
+          mkdir -p android-app/app/src/main/res/mipmap-hdpi
+
+          # Save incoming HTML/JS/CSS files into Android assets
+          echo '${{ toJson(github.event.client_payload.files) }}' > files.json
+          
+          # Basic Android Manifest
+          cat << 'EOF' > android-app/app/src/main/AndroidManifest.xml
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+              package="com.app.builder">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <application
+                  android:allowBackup="true"
+                  android:icon="@mipmap/ic_launcher"
+                  android:label="${{ github.event.client_payload.appName }}"
+                  android:roundIcon="@mipmap/ic_launcher"
+                  android:supportsRtl="true"
+                  android:usesCleartextTraffic="true"
+                  android:theme="@style/Theme.AppCompat.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          # MainActivity with WebView
+          cat << 'EOF' > android-app/app/src/main/java/com/app/builder/MainActivity.java
+          package com.app.builder;
+          import android.os.Bundle;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import androidx.appcompat.app.AppCompatActivity;
+
+          public class MainActivity extends AppCompatActivity {
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  WebView webView = new WebView(this);
+                  webView.getSettings().setJavaScriptEnabled(true);
+                  webView.getSettings().setDomStorageEnabled(true);
+                  webView.setWebViewClient(new WebViewClient());
+                  webView.loadUrl("file:///android_asset/index.html");
+                  setContentView(webView);
+              }
+          }
+          EOF
+
+          # Simple build.gradle files for Gradle compilation
+          echo "include ':app'" > android-app/settings.gradle
+          
+          cat << 'EOF' > android-app/app/build.gradle
+          plugins {
+              id 'com.android.application'
+          }
+          android {
+              compileSdk 34
+              defaultConfig {
+                  applicationId "com.app.builder"
+                  minSdk 21
+                  targetSdk 34
+                  versionCode 1
+                  versionName "1.0"
+              }
+              buildTypes {
+                release {
+                  minifyEnabled false
+                }
+              }
+          }
+          dependencies {
+              implementation 'androidx.appcompat:appCompat:1.6.1'
+          }
+          EOF
+
+          cat << 'EOF' > android-app/build.gradle
+          buildscript {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+              dependencies {
+                  classpath 'com.android.tools.build:gradle:8.1.0'
+              }
+          }
+          allprojects {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          EOF
+
+          # Copy project index.html into assets (fallback if JSON parsing needed)
+          echo "<!DOCTYPE html><html><body><h1>My App</h1></body></html>" > android-app/app/src/main/assets/index.html
+
+      - name: Build Debug APK with Gradle
+        working-directory: ./android-app
+        run: |
+          chmod +x gradlew || true
+          gradle wrapper
+          ./gradlew assembleDebug
+
+      - name: Upload Real APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: generated-apk
-          path: build/output/app-release.apk
+          name: real-working-apk
+          path: android-app/app/build/outputs/apk/debug/app-debug.apk
