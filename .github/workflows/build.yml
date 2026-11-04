@@ -17,8 +17,21 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Setup Android SDK manually
+        run: |
+          echo "Setting up Android SDK..."
+          export ANDROID_SDK_ROOT=$HOME/android-sdk
+          mkdir -p $ANDROID_SDK_ROOT/cmdline-tools
+          
+          # Download command line tools
+          wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O cmdtools.zip
+          unzip -q cmdtools.zip -d $ANDROID_SDK_ROOT/cmdline-tools
+          mv $ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools $ANDROID_SDK_ROOT/cmdline-tools/latest
+          
+          # Accept licenses and install platform tools
+          export PATH=$PATH:$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools
+          yes | sdkmanager --licenses || true
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
 
       - name: Create Android Project Structure
         run: |
@@ -73,7 +86,7 @@ jobs:
           }
           EOF
 
-          # Simple build.gradle files for Gradle compilation
+          # Gradle configuration
           echo "include ':app'" > android-app/settings.gradle
           
           cat << 'EOF' > android-app/app/build.gradle
@@ -117,6 +130,9 @@ jobs:
               }
           }
           EOF
+
+          # Local.properties for SDK path
+          echo "sdk.dir=$HOME/android-sdk" > android-app/local.properties
 
           # Default web assets
           echo "<!DOCTYPE html><html><body style='background:#111;color:#fff;text-align:center;padding-top:50px;'><h2>My WebView App</h2></body></html>" > android-app/app/src/main/assets/index.html
