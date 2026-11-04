@@ -6,7 +6,7 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
-const GITHUB_TOKEN = "YAHAN_APNA_NAYA_GITHUB_TOKEN_DIRE"; 
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const GITHUB_REPO = "mrihtisham98-ops/apk-builder-backend";
 
 app.post('/api/cloud-build-apk', async (req, res) => {
