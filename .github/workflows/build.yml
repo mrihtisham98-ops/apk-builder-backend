@@ -11,36 +11,18 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Set up JDK 11
-        uses: actions/setup-java@v5
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: '11'
+          java-version: '17'
 
-      - name: Setup Android SDK and Build APK
+      - name: Build Android APK
         run: |
-          # 1. Setup Android SDK manually
-          export ANDROID_SDK_ROOT=$HOME/android-sdk
-          mkdir -p $ANDROID_SDK_ROOT/cmdline-tools
-          
-          echo "Downloading Android SDK Command-line Tools..."
-          wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O cmdtools.zip
-          unzip -q cmdtools.zip -d $ANDROID_SDK_ROOT/cmdline-tools
-          mv $ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools $ANDROID_SDK_ROOT/cmdline-tools/latest
-          
-          # Add to path
-          export PATH=$PATH:$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools
-          
-          # Accept licenses automatically
-          yes | sdkmanager --licenses || true
-          
-          echo "Installing platforms and build-tools..."
-          sdkmanager "platform-tools" "platforms;android-33" "build-tools;33.0.2"
-
-          # 2. Create Project Structure
+          # Create Android Project Structure
           mkdir -p myapp/app/src/main/assets
           mkdir -p myapp/app/src/main/java/com/app/builder
-          mkdir -p myapp/app/src/main/res
+          mkdir -p myapp/app/src/main/res/values
 
           # Android Manifest
           cat << 'EOF' > myapp/app/src/main/AndroidManifest.xml
@@ -49,7 +31,8 @@ jobs:
               <uses-permission android:name="android.permission.INTERNET" />
               <application
                   android:label="${{ github.event.client_payload.appName }}"
-                  android:usesCleartextTraffic="true">
+                  android:usesCleartextTraffic="true"
+                  android:theme="@android:style/Theme.NoTitleBar">
                   <activity
                       android:name=".MainActivity"
                       android:exported="true">
@@ -67,14 +50,17 @@ jobs:
           package com.app.builder;
           import android.os.Bundle;
           import android.webkit.WebView;
-          import androidx.appcompat.app.AppCompatActivity;
+          import android.webkit.WebViewClient;
+          import android.app.Activity;
 
-          public class MainActivity extends AppCompatActivity {
+          public class MainActivity extends Activity {
               @Override
               protected void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
                   WebView webView = new WebView(this);
                   webView.getSettings().setJavaScriptEnabled(true);
+                  webView.getSettings().setDomStorageEnabled(true);
+                  webView.setWebViewClient(new WebViewClient());
                   webView.loadUrl("file:///android_asset/index.html");
                   setContentView(webView);
               }
@@ -90,17 +76,15 @@ jobs:
               id 'com.android.application'
           }
           android {
-              compileSdk 33
+              compileSdk 34
+              namespace 'com.app.builder'
               defaultConfig {
                   applicationId "com.app.builder"
                   minSdk 21
-                  targetSdk 33
+                  targetSdk 34
                   versionCode 1
                   versionName "1.0"
               }
-          }
-          dependencies {
-              implementation 'androidx.appcompat:appcompat:1.6.1'
           }
           EOF
 
@@ -112,7 +96,7 @@ jobs:
                   mavenCentral()
               }
               dependencies {
-                  classpath 'com.android.tools.build:gradle:7.4.2'
+                  classpath 'com.android.tools.build:gradle:8.1.0'
               }
           }
           allprojects {
@@ -123,19 +107,15 @@ jobs:
           }
           EOF
 
-          # local.properties pointing to SDK
-          echo "sdk.dir=$ANDROID_SDK_ROOT" > myapp/local.properties
+          # Set local.properties to runner's built-in SDK path
+          echo "sdk.dir=$ANDROID_HOME" > myapp/local.properties
 
-          # Sample index.html inside assets
-          echo "<!DOCTYPE html><html><head><title>App</title></head><body style='background:#111;color:white;text-align:center;padding-top:50px;'><h1>Hello from Cloud App!</h1></body></html>" > myapp/app/src/main/assets/index.html
+          # App Asset File
+          echo "<!DOCTYPE html><html><head><title>App</title></head><body style='background:#111;color:white;text-align:center;padding-top:50px;'><h1>Cloud Build Successful!</h1></body></html>" > myapp/app/src/main/assets/index.html
 
-          # 3. Build APK with Gradle
+          # Generate Gradle Wrapper & Build APK
           cd myapp
-          wget -q https://services.gradle.org/distributions/gradle-7.5-bin.zip
-          unzip -q gradle-7.5-bin.zip
-          export PATH=$PWD/gradle-7.5/bin:$PATH
-          
-          gradle wrapper --gradle-version 7.5
+          gradle wrapper --gradle-version 8.0
           chmod +x gradlew
           ./gradlew assembleDebug
 
