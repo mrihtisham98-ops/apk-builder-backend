@@ -17,41 +17,20 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Setup Android SDK manually
+      - name: Create Minimal Android App
         run: |
-          echo "Setting up Android SDK..."
-          export ANDROID_SDK_ROOT=$HOME/android-sdk
-          mkdir -p $ANDROID_SDK_ROOT/cmdline-tools
-          
-          # Download command line tools
-          wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O cmdtools.zip
-          unzip -q cmdtools.zip -d $ANDROID_SDK_ROOT/cmdline-tools
-          mv $ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools $ANDROID_SDK_ROOT/cmdline-tools/latest
-          
-          # Accept licenses and install platform tools
-          export PATH=$PATH:$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools
-          yes | sdkmanager --licenses || true
-          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+          mkdir -p myapp/app/src/main/assets
+          mkdir -p myapp/app/src/main/java/com/app/builder
+          mkdir -p myapp/app/src/main/res
 
-      - name: Create Android Project Structure
-        run: |
-          mkdir -p android-app/app/src/main/assets
-          mkdir -p android-app/app/src/main/java/com/app/builder
-          mkdir -p android-app/app/src/main/res/mipmap-hdpi
-
-          # Basic Android Manifest
-          cat << 'EOF' > android-app/app/src/main/AndroidManifest.xml
+          # Android Manifest
+          cat << 'EOF' > myapp/app/src/main/AndroidManifest.xml
           <manifest xmlns:android="http://schemas.android.com/apk/res/android"
               package="com.app.builder">
               <uses-permission android:name="android.permission.INTERNET" />
               <application
-                  android:allowBackup="true"
-                  android:icon="@mipmap/ic_launcher"
                   android:label="${{ github.event.client_payload.appName }}"
-                  android:roundIcon="@mipmap/ic_launcher"
-                  android:supportsRtl="true"
-                  android:usesCleartextTraffic="true"
-                  android:theme="@style/Theme.AppCompat.NoActionBar">
+                  android:usesCleartextTraffic="true">
                   <activity
                       android:name=".MainActivity"
                       android:exported="true">
@@ -65,11 +44,10 @@ jobs:
           EOF
 
           # MainActivity with WebView
-          cat << 'EOF' > android-app/app/src/main/java/com/app/builder/MainActivity.java
+          cat << 'EOF' > myapp/app/src/main/java/com/app/builder/MainActivity.java
           package com.app.builder;
           import android.os.Bundle;
           import android.webkit.WebView;
-          import android.webkit.WebViewClient;
           import androidx.appcompat.app.AppCompatActivity;
 
           public class MainActivity extends AppCompatActivity {
@@ -78,34 +56,27 @@ jobs:
                   super.onCreate(savedInstanceState);
                   WebView webView = new WebView(this);
                   webView.getSettings().setJavaScriptEnabled(true);
-                  webView.getSettings().setDomStorageEnabled(true);
-                  webView.setWebViewClient(new WebViewClient());
                   webView.loadUrl("file:///android_asset/index.html");
                   setContentView(webView);
               }
           }
           EOF
 
-          # Gradle configuration
-          echo "include ':app'" > android-app/settings.gradle
-          
-          cat << 'EOF' > android-app/app/build.gradle
+          # Gradle Settings & Build configs
+          echo "include ':app'" > myapp/settings.gradle
+
+          cat << 'EOF' > myapp/app/build.gradle
           plugins {
               id 'com.android.application'
           }
           android {
-              compileSdk 34
+              compileSdk 33
               defaultConfig {
                   applicationId "com.app.builder"
                   minSdk 21
-                  targetSdk 34
+                  targetSdk 33
                   versionCode 1
                   versionName "1.0"
-              }
-              buildTypes {
-                release {
-                  minifyEnabled false
-                }
               }
           }
           dependencies {
@@ -113,14 +84,14 @@ jobs:
           }
           EOF
 
-          cat << 'EOF' > android-app/build.gradle
+          cat << 'EOF' > myapp/build.gradle
           buildscript {
               repositories {
                   google()
                   mavenCentral()
               }
               dependencies {
-                  classpath 'com.android.tools.build:gradle:8.1.0'
+                  classpath 'com.android.tools.build:gradle:7.4.2'
               }
           }
           allprojects {
@@ -131,21 +102,18 @@ jobs:
           }
           EOF
 
-          # Local.properties for SDK path
-          echo "sdk.dir=$HOME/android-sdk" > android-app/local.properties
+          # Sample index.html inside assets
+          echo "<!DOCTYPE html><html><head><title>App</title></head><body style='background:purple;color:white;text-align:center;padding-top:50px;'><h1>Hello from Cloud App!</h1></body></html>" > myapp/app/src/main/assets/index.html
 
-          # Default web assets
-          echo "<!DOCTYPE html><html><body style='background:#111;color:#fff;text-align:center;padding-top:50px;'><h2>My WebView App</h2></body></html>" > android-app/app/src/main/assets/index.html
-
-      - name: Build Debug APK with Gradle
-        working-directory: ./android-app
+      - name: Build APK with Gradle
+        working-directory: ./myapp
         run: |
           gradle wrapper
           chmod +x gradlew || true
           ./gradlew assembleDebug
 
-      - name: Upload Real APK Artifact
+      - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: real-working-apk
-          path: android-app/app/build/outputs/apk/debug/app-debug.apk
+          path: myapp/app/build/outputs/apk/debug/app-debug.apk
