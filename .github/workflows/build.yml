@@ -17,7 +17,10 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Create Minimal Android App
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Create Minimal Android App Structure
         run: |
           mkdir -p myapp/app/src/main/assets
           mkdir -p myapp/app/src/main/java/com/app/builder
@@ -62,9 +65,10 @@ jobs:
           }
           EOF
 
-          # Gradle Settings & Build configs
+          # Gradle Settings
           echo "include ':app'" > myapp/settings.gradle
 
+          # App build.gradle
           cat << 'EOF' > myapp/app/build.gradle
           plugins {
               id 'com.android.application'
@@ -84,6 +88,7 @@ jobs:
           }
           EOF
 
+          # Root build.gradle
           cat << 'EOF' > myapp/build.gradle
           buildscript {
               repositories {
@@ -103,13 +108,16 @@ jobs:
           EOF
 
           # Sample index.html inside assets
-          echo "<!DOCTYPE html><html><head><title>App</title></head><body style='background:purple;color:white;text-align:center;padding-top:50px;'><h1>Hello from Cloud App!</h1></body></html>" > myapp/app/src/main/assets/index.html
+          echo "<!DOCTYPE html><html><head><title>App</title></head><body style='background:#111;color:white;text-align:center;padding-top:50px;'><h1>Hello from Cloud App!</h1></body></html>" > myapp/app/src/main/assets/index.html
 
-      - name: Build APK with Gradle
+          # Initialize gradle wrapper so gradlew is created successfully
+          cd myapp
+          gradle wrapper --gradle-version 7.5
+
+      - name: Build APK with Gradle Wrapper
         working-directory: ./myapp
         run: |
-          gradle wrapper
-          chmod +x gradlew || true
+          chmod +x gradlew
           ./gradlew assembleDebug
 
       - name: Upload APK Artifact
