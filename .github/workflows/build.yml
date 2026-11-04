@@ -20,8 +20,7 @@ jobs:
       - name: Setup Gradle (Caching Disabled)
         uses: gradle/actions/setup-gradle@v3
         with:
-          cache-read-only: true
-          cache-enabled: false
+          cache-disabled: true
 
       - name: Create Minimal Android App Structure
         run: |
