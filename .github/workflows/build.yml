@@ -17,14 +17,13 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Build Android APK
+      - name: Generate Android Project and Build APK
         run: |
-          # Create Android Project Structure
           mkdir -p myapp/app/src/main/assets
           mkdir -p myapp/app/src/main/java/com/app/builder
           mkdir -p myapp/app/src/main/res/values
 
-          # Android Manifest
+          # Manifest File
           cat << 'EOF' > myapp/app/src/main/AndroidManifest.xml
           <manifest xmlns:android="http://schemas.android.com/apk/res/android"
               package="com.app.builder">
@@ -45,7 +44,7 @@ jobs:
           </manifest>
           EOF
 
-          # MainActivity with WebView
+          # MainActivity
           cat << 'EOF' > myapp/app/src/main/java/com/app/builder/MainActivity.java
           package com.app.builder;
           import android.os.Bundle;
@@ -67,10 +66,9 @@ jobs:
           }
           EOF
 
-          # Gradle Settings
+          # Gradle Settings & Configs
           echo "include ':app'" > myapp/settings.gradle
 
-          # App build.gradle
           cat << 'EOF' > myapp/app/build.gradle
           plugins {
               id 'com.android.application'
@@ -88,7 +86,6 @@ jobs:
           }
           EOF
 
-          # Root build.gradle
           cat << 'EOF' > myapp/build.gradle
           buildscript {
               repositories {
@@ -107,13 +104,13 @@ jobs:
           }
           EOF
 
-          # Set local.properties to runner's built-in SDK path
+          # Link Runner Built-in SDK
           echo "sdk.dir=$ANDROID_HOME" > myapp/local.properties
 
-          # App Asset File
+          # Assets
           echo "<!DOCTYPE html><html><head><title>App</title></head><body style='background:#111;color:white;text-align:center;padding-top:50px;'><h1>Cloud Build Successful!</h1></body></html>" > myapp/app/src/main/assets/index.html
 
-          # Generate Gradle Wrapper & Build APK
+          # Build Execution
           cd myapp
           gradle wrapper --gradle-version 8.0
           chmod +x gradlew
