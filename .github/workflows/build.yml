@@ -28,6 +28,9 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      - name: Install Python Image Support
+        run: pip install Pillow
+
       - name: Set up Gradle Cache
         uses: gradle/actions/setup-gradle@v4
 
@@ -295,9 +298,6 @@ jobs:
           PY
         env:
           BUILD_ID: ${{ github.event.client_payload.buildId }}
-
-      - name: Install Python Image Support
-        run: pip install Pillow
 
       - name: Install Gradle 8.0
         run: |
