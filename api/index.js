@@ -1,3 +1,4 @@
+
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
@@ -10,13 +11,19 @@ const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const GITHUB_REPO = "mrihtisham98-ops/apk-builder-backend";
 
 app.post('/api/cloud-build-apk', async (req, res) => {
-    const { appName, files } = req.body;
+    const { appName, packageName, appIcon, files } = req.body;
+
     try {
         const response = await axios.post(
             `https://api.github.com/repos/${GITHUB_REPO}/dispatches`,
             {
                 event_type: 'build_apk',
-                client_payload: { appName, files }
+                client_payload: {
+                    appName,
+                    packageName,
+                    appIcon,
+                    files
+                }
             },
             {
                 headers: {
@@ -25,9 +32,23 @@ app.post('/api/cloud-build-apk', async (req, res) => {
                 }
             }
         );
-        res.json({ success: true, message: "APK Build initiated on GitHub Actions!" });
+
+        res.json({
+            success: true,
+            message: "APK Build initiated on GitHub Actions!"
+        });
+
     } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
+        console.error(
+            "GitHub API Error:",
+            error.response?.data || error.message
+        );
+
+        res.status(error.response?.status || 500).json({
+            success: false,
+            error: error.message,
+            details: error.response?.data || null
+        });
     }
 });
 
