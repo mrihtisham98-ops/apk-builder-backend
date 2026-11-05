@@ -83,7 +83,6 @@ jobs:
           ET.register_namespace("android", android_ns)
 
           manifest = ET.Element("manifest")
-          manifest.set("xmlns:android", android_ns)
           manifest.set("package", package_name)
 
           permission = ET.SubElement(manifest, "uses-permission")
