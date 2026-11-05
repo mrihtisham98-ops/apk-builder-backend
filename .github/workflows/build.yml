@@ -1,38 +1,38 @@
 name: Build Real APK
- 
+
 run-name: Build APK ${{ github.event.client_payload.buildId }}
- 
+
 on:
   repository_dispatch:
     types: [build_apk]
- 
+
 permissions:
   contents: write
   actions: read
- 
+
 jobs:
   build:
     runs-on: ubuntu-latest
- 
+
     steps:
       - name: Checkout Temporary Build Branch
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.client_payload.ref }}
           path: source
- 
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
- 
+
       - name: Install Python Image Support
         run: pip install Pillow
- 
+
       - name: Set up Gradle Cache
         uses: gradle/actions/setup-gradle@v4
- 
+
       - name: Read Build Configuration and Copy Project
         env:
           BUILD_ID: ${{ github.event.client_payload.buildId }}
@@ -44,52 +44,52 @@ jobs:
           import re
           import xml.etree.ElementTree as ET
           from pathlib import Path
- 
+
           build_id = os.environ["BUILD_ID"]
           source = Path("source/.build-input") / build_id
           config_file = source / "build-config.json"
           project = source / "project"
- 
+
           if not config_file.is_file():
               raise SystemExit("ERROR: build-config.json not found.")
- 
+
           config = json.loads(config_file.read_text(encoding="utf-8"))
- 
+
           app_name = config.get("appName", "My Web App")
           package_name = config.get("packageName", "")
           icon_path = config.get("iconPath")
- 
+
           if not re.fullmatch(
-              r"[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z][a-zA-Z0-9_]*)+",
+              r"[a-zA-Z][a-zA-Z0-9_]*(\\.[a-zA-Z][a-zA-Z0-9_]*)+",
               package_name
           ):
               raise SystemExit("ERROR: Invalid package name.")
- 
+
           if not (project / "index.html").is_file():
               raise SystemExit("ERROR: Root index.html is missing.")
- 
+
           root = Path("myapp")
           assets = root / "app/src/main/assets"
           java_dir = root / "app/src/main/java" / Path(*package_name.split("."))
- 
+
           assets.mkdir(parents=True, exist_ok=True)
           java_dir.mkdir(parents=True, exist_ok=True)
- 
+
           shutil.copytree(project, assets, dirs_exist_ok=True)
- 
+
           # Create Android manifest.
           android_ns = "http://schemas.android.com/apk/res/android"
           ET.register_namespace("android", android_ns)
- 
+
           manifest = ET.Element("manifest")
           manifest.set("package", package_name)
- 
+
           permission = ET.SubElement(manifest, "uses-permission")
           permission.set(
               f"{{{android_ns}}}name",
               "android.permission.INTERNET"
           )
- 
+
           application = ET.SubElement(manifest, "application")
           application.set(f"{{{android_ns}}}label", app_name)
           application.set(
@@ -100,7 +100,7 @@ jobs:
               f"{{{android_ns}}}usesCleartextTraffic",
               "true"
           )
- 
+
           activity = ET.SubElement(application, "activity")
           activity.set(
               f"{{{android_ns}}}name",
@@ -110,20 +110,20 @@ jobs:
               f"{{{android_ns}}}exported",
               "true"
           )
- 
+
           intent = ET.SubElement(activity, "intent-filter")
           action = ET.SubElement(intent, "action")
           action.set(
               f"{{{android_ns}}}name",
               "android.intent.action.MAIN"
           )
- 
+
           category = ET.SubElement(intent, "category")
           category.set(
               f"{{{android_ns}}}name",
               "android.intent.category.LAUNCHER"
           )
- 
+
           manifest_path = root / "app/src/main/AndroidManifest.xml"
           manifest_path.parent.mkdir(parents=True, exist_ok=True)
           ET.ElementTree(manifest).write(
@@ -131,10 +131,10 @@ jobs:
               encoding="utf-8",
               xml_declaration=True
           )
- 
+
           # Create MainActivity with Android WebView file picker support.
           java_code = f'''package {package_name};
- 
+
           import android.app.Activity;
           import android.os.Bundle;
           import android.content.Intent;
@@ -145,40 +145,40 @@ jobs:
           import android.webkit.WebSettings;
           import android.webkit.ValueCallback;
           import android.content.ActivityNotFoundException;
- 
+
           public class MainActivity extends Activity {{
               private WebView webView;
               private ValueCallback<Uri[]> filePathCallback;
               private static final int FILE_CHOOSER_REQUEST_CODE = 1001;
- 
+
               @Override
               protected void onCreate(Bundle savedInstanceState) {{
                   super.onCreate(savedInstanceState);
- 
+
                   webView = new WebView(this);
- 
+
                   WebSettings settings = webView.getSettings();
                   settings.setJavaScriptEnabled(true);
                   settings.setDomStorageEnabled(true);
                   settings.setAllowFileAccess(true);
                   settings.setAllowContentAccess(true);
- 
+
                   webView.setWebViewClient(new WebViewClient());
- 
+
                   webView.setWebChromeClient(new WebChromeClient() {{
                       @Override
                       public boolean onShowFileChooser(
                               WebView webView,
                               ValueCallback<Uri[]> filePathCallback,
                               FileChooserParams fileChooserParams) {{
- 
+
                           if (MainActivity.this.filePathCallback != null) {{
                               MainActivity.this.filePathCallback.onReceiveValue(null);
                               MainActivity.this.filePathCallback = null;
                           }}
- 
+
                           MainActivity.this.filePathCallback = filePathCallback;
- 
+
                           try {{
                               Intent intent = fileChooserParams.createIntent();
                               startActivityForResult(
@@ -192,37 +192,37 @@ jobs:
                           }}
                       }}
                   }});
- 
+
                   webView.loadUrl("file:///android_asset/index.html");
                   setContentView(webView);
               }}
- 
+
               @Override
               protected void onActivityResult(
                       int requestCode,
                       int resultCode,
                       Intent data) {{
                   super.onActivityResult(requestCode, resultCode, data);
- 
+
                   if (requestCode == FILE_CHOOSER_REQUEST_CODE) {{
                       if (filePathCallback == null) {{
                           return;
                       }}
- 
+
                       Uri[] results = null;
- 
+
                       if (resultCode == Activity.RESULT_OK && data != null) {{
                           results = WebChromeClient.FileChooserParams.parseResult(
                               resultCode,
                               data
                           );
                       }}
- 
+
                       filePathCallback.onReceiveValue(results);
                       filePathCallback = null;
                   }}
               }}
- 
+
               @Override
               public void onBackPressed() {{
                   if (webView != null && webView.canGoBack()) {{
@@ -233,23 +233,23 @@ jobs:
               }}
           }}
           '''
- 
+
           (java_dir / "MainActivity.java").write_text(
               java_code,
               encoding="utf-8"
           )
- 
+
           # Create launcher icons if an icon was uploaded.
           if icon_path:
               icon_file = source / icon_path
- 
+
               if not icon_file.is_file():
                   raise SystemExit("ERROR: Uploaded app icon not found.")
- 
+
               from PIL import Image
- 
+
               image = Image.open(icon_file).convert("RGBA")
- 
+
               for folder, size in [
                   ("mipmap-mdpi", 48),
                   ("mipmap-hdpi", 72),
@@ -259,34 +259,34 @@ jobs:
               ]:
                   target = root / "app/src/main/res" / folder
                   target.mkdir(parents=True, exist_ok=True)
- 
+
                   resized = image.resize(
                       (size, size),
                       Image.Resampling.LANCZOS
                   )
- 
+
                   resized.save(target / "ic_launcher.png")
- 
+
               application.set(
                   f"{{{android_ns}}}icon",
                   "@mipmap/ic_launcher"
               )
- 
+
               ET.ElementTree(manifest).write(
                   manifest_path,
                   encoding="utf-8",
                   xml_declaration=True
               )
- 
+
           print("Project files copied successfully.")
           print("App:", app_name)
           print("Package:", package_name)
           PY
- 
+
       - name: Create Gradle Project
         run: |
           mkdir -p myapp/app
- 
+
           cat > myapp/settings.gradle <<'EOF'
           pluginManagement {
               repositories {
@@ -295,7 +295,7 @@ jobs:
                   gradlePluginPortal()
               }
           }
- 
+
           dependencyResolutionManagement {
               repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
               repositories {
@@ -303,26 +303,26 @@ jobs:
                   mavenCentral()
               }
           }
- 
+
           rootProject.name = 'MyWebApp'
           include ':app'
           EOF
- 
+
           cat > myapp/build.gradle <<'EOF'
           plugins {
               id 'com.android.application' version '8.1.0' apply false
           }
           EOF
- 
+
           cat > myapp/app/build.gradle <<'EOF'
           plugins {
               id 'com.android.application'
           }
- 
+
           android {
               namespace 'com.app.builder'
               compileSdk 34
- 
+
               defaultConfig {
                   applicationId 'com.app.builder'
                   minSdk 21
@@ -332,19 +332,19 @@ jobs:
               }
           }
           EOF
- 
+
           # Replace the default package settings with the user's package.
           python3 - <<'PY'
           import json
           import os
           from pathlib import Path
- 
+
           build_id = os.environ["BUILD_ID"]
           config = json.loads(
               (Path("source/.build-input") / build_id / "build-config.json")
               .read_text(encoding="utf-8")
           )
- 
+
           gradle_file = Path("myapp/app/build.gradle")
           content = gradle_file.read_text(encoding="utf-8")
           content = content.replace(
@@ -355,19 +355,19 @@ jobs:
           PY
         env:
           BUILD_ID: ${{ github.event.client_payload.buildId }}
- 
+
       - name: Install Gradle 8.0
         run: |
           curl -fsSL https://services.gradle.org/distributions/gradle-8.0-bin.zip -o /tmp/gradle.zip
           unzip -q /tmp/gradle.zip -d /tmp
           /tmp/gradle-8.0/bin/gradle wrapper --gradle-version 8.0 --project-dir myapp
- 
+
       - name: Build APK
         run: |
           cd myapp
           chmod +x gradlew
           ./gradlew assembleDebug
- 
+
       - name: Upload APK to Public GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -375,17 +375,17 @@ jobs:
         run: |
           APK="myapp/app/build/outputs/apk/debug/app-debug.apk"
           TAG="apk-${BUILD_ID}"
- 
+
           if [ ! -f "$APK" ]; then
             echo "ERROR: APK file not found."
             exit 1
           fi
- 
+
           gh release create "$TAG" "$APK" \
             --repo "$GITHUB_REPOSITORY" \
             --title "APK ${BUILD_ID}" \
             --notes "Your APK build is complete."
- 
+
       - name: Delete Temporary Build Branch
         if: always()
         env:
