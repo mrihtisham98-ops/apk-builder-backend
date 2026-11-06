@@ -22,115 +22,53 @@ const github = axios.create({
 });
 
 // ============================================================
-// TOKEN BUDGET HELPERS (Groq TPM 8000 se neeche rehne ke liye)
+// TOKEN BUDGET (Groq TPM 8000 se neeche rehne ke liye)
 // ============================================================
-const MAX_TOTAL_CHARS = 22000;       // overall safety cap (~5500 tokens)
-const MAX_SYSTEM_CHARS = 3000;       // system prompt cap (~750 tokens)
-const MAX_FILE_CONTEXT_CHARS = 9000; // file content cap (~2250 tokens)
-const MAX_HISTORY_CHARS = 6000;      // conversation history cap (~1500 tokens)
-const MAX_USER_MSG_CHARS = 8000;     // latest user message cap (rarely hit)
+// 1 token ≈ 3.5 chars (mixed code + English) — conservative.
+const MAX_INPUT_TOKENS = 5500;                    // total input budget
+const MAX_INPUT_CHARS = Math.floor(MAX_INPUT_TOKENS * 3.5); // ~19250
+const MAX_SYSTEM_TOKENS = 1200;
+const MAX_SYSTEM_CHARS = Math.floor(MAX_SYSTEM_TOKENS * 3.5); // 4200
+const MAX_FILE_TOKENS = 2500;
+const MAX_FILE_CHARS = Math.floor(MAX_FILE_TOKENS * 3.5); // 8750
+const MAX_HISTORY_MESSAGES = 3;                   // last 3 older messages
+const MAX_OUTPUT_TOKENS = 2048;                   // output reservation
 
 function estimateTokens(str) {
     if (!str) return 0;
     return Math.ceil(String(str).length / 3.5);
 }
 
-function smartTruncateFile(code, maxChars) {
+// Smart-truncate: keep head (imports/config) + tail (main logic/exports)
+function smartTruncate(code, maxChars) {
     if (!code) return '';
     const s = String(code);
     if (s.length <= maxChars) return s;
     const headLen = Math.floor(maxChars * 0.6);
     const tailLen = Math.floor(maxChars * 0.35);
-    const head = s.slice(0, headLen);
-    const tail = s.slice(s.length - tailLen);
     return (
-        head +
-        '\n\n/* ... [middle of file truncated to fit token limit] ... */\n\n' +
-        tail
+        s.slice(0, headLen) +
+        '\n\n/* ... [middle truncated to fit token limit] ... */\n\n' +
+        s.slice(s.length - tailLen)
     );
 }
 
-function truncateMessageContent(content, maxChars) {
-    if (!content) return '';
-    const s = String(content);
-    if (s.length <= maxChars) return s;
-    return s.slice(0, maxChars) + '\n... [truncated]';
-}
-
-// Keep newest messages first, drop oldest when over budget.
-// Latest user message is ALWAYS preserved fully.
-function buildTrimmedHistory(history, latestUserMessage) {
-    if (!Array.isArray(history)) history = [];
-
-    const filtered = history.filter(
-        (m) => m && typeof m === 'object' && typeof m.content === 'string'
+// Extract file content block from incoming systemPrompt (frontend format)
+function extractFileFromPrompt(systemPrompt) {
+    if (!systemPrompt) return { header: '', fileContent: '' };
+    const match = systemPrompt.match(
+        /CURRENT FILE CONTENT[\s\S]*?```\s*([\s\S]*?)```/i
     );
-
-    let used = 0;
-    const kept = [];
-
-    for (let i = filtered.length - 1; i >= 0; i--) {
-        const msg = filtered[i];
-        const isLatestUser =
-            i === filtered.length - 1 && msg.role === 'user';
-
-        const perMsgCap = msg.role === 'assistant' ? 2500 : MAX_USER_MSG_CHARS;
-        let content = isLatestUser
-            ? msg.content
-            : truncateMessageContent(msg.content, perMsgCap);
-
-        const cost = content.length;
-        if (used + cost > MAX_HISTORY_CHARS && kept.length > 0) {
-            break;
-        }
-        if (used + cost > MAX_HISTORY_CHARS && kept.length === 0) {
-            content = content.slice(0, MAX_HISTORY_CHARS);
-        }
-        kept.unshift({ role: msg.role, content });
-        used += content.length;
+    if (!match) {
+        return { header: String(systemPrompt), fileContent: '' };
     }
-
-    if (latestUserMessage) {
-        const last = kept[kept.length - 1];
-        if (!last || last.role !== 'user' || last.content !== latestUserMessage) {
-            while (
-                kept.length > 0 &&
-                kept[kept.length - 1].role === 'user' &&
-                kept[kept.length - 1].content === latestUserMessage
-            ) {
-                kept.pop();
-            }
-            kept.push({ role: 'user', content: latestUserMessage });
-        }
-    }
-
-    return kept;
+    const header = String(systemPrompt).replace(match[0], '').trim();
+    return { header, fileContent: match[1] || '' };
 }
 
-function buildTrimmedSystemPrompt(systemPrompt) {
-    if (!systemPrompt) {
-        return 'You are an expert coding assistant inside a web IDE.';
-    }
-    const s = String(systemPrompt);
-
-    // Try to smart-trim the embedded file content block, if present.
-    const fileBlockRegex = /CURRENT FILE CONTENT[\s\S]*?```\s*([\s\S]*?)```/i;
-    const match = s.match(fileBlockRegex);
-
-    if (match && match[1] && match[1].length > MAX_FILE_CONTEXT_CHARS) {
-        const trimmedFile = smartTruncateFile(match[1], MAX_FILE_CONTEXT_CHARS);
-        return s.replace(match[0],
-            'CURRENT FILE CONTENT (may be partially truncated):\n```\n' +
-            trimmedFile +
-            '\n```'
-        );
-    }
-
-    if (s.length <= MAX_SYSTEM_CHARS) return s;
-    return s.slice(0, MAX_SYSTEM_CHARS) + '\n... [system prompt truncated]';
-}
-
+// ============================================================
 // Convert nested project files into individual paths.
+// ============================================================
 function flattenFiles(obj, prefix = '', output = []) {
     if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
         throw new Error('Invalid project files.');
@@ -171,7 +109,9 @@ async function createBlob(content, encoding = 'utf-8') {
     return response.data.sha;
 }
 
-// Start a cloud APK build.
+// ============================================================
+// Start a cloud APK build. (UNCHANGED)
+// ============================================================
 app.post('/api/cloud-build-apk', async (req, res) => {
     let branch = null;
 
@@ -360,7 +300,9 @@ app.post('/api/cloud-build-apk', async (req, res) => {
     }
 });
 
-// Check build status and get the public APK download link.
+// ============================================================
+// Check build status. (UNCHANGED)
+// ============================================================
 app.get('/api/build-status/:buildId', async (req, res) => {
     try {
         const buildId = req.params.buildId;
@@ -374,7 +316,6 @@ app.get('/api/build-status/:buildId', async (req, res) => {
 
         const tag = `apk-${buildId}`;
 
-        // First check whether the APK release exists.
         try {
             const releaseResponse = await github.get(
                 `${API}/releases/tags/${tag}`
@@ -396,7 +337,6 @@ app.get('/api/build-status/:buildId', async (req, res) => {
             if (error.response?.status !== 404) throw error;
         }
 
-        // Find the GitHub Actions run for this build.
         const runsResponse = await github.get(
             `${API}/actions/runs`,
             { params: { per_page: 100 } }
@@ -441,10 +381,13 @@ app.get('/api/build-status/:buildId', async (req, res) => {
     }
 });
 
-// Secure Groq AI Chat Endpoint
+// ============================================================
+// Secure Groq AI Chat Endpoint — Token-budgeted
+// ============================================================
 app.post('/api/ai-chat', async (req, res) => {
     try {
-        const GROQ_API_KEY = process.env.Ai_Api_key;
+        const GROQ_API_KEY = process.env.GROQ_API_KEY
+            || process.env.Ai_Api_key; // fallback to existing var name
 
         if (!GROQ_API_KEY) {
             return res.status(500).json({
@@ -452,64 +395,113 @@ app.post('/api/ai-chat', async (req, res) => {
             });
         }
 
-        const { messages, systemPrompt } = req.body || {};
+        const body = req.body || {};
+        let messages = body.messages;
+        let systemPrompt = body.systemPrompt || '';
 
         if (!Array.isArray(messages) || messages.length === 0) {
-            return res.status(400).json({
-                error: 'Messages are required.'
-            });
+            return res.status(400).json({ error: 'Messages are required.' });
         }
 
         // ---------- Extract latest user message (NEVER truncate) ----------
         let latestUserMessage = '';
+        let latestUserIndex = -1;
         for (let i = messages.length - 1; i >= 0; i--) {
             if (messages[i] && messages[i].role === 'user' && messages[i].content) {
                 latestUserMessage = String(messages[i].content);
+                latestUserIndex = i;
                 break;
             }
         }
         if (!latestUserMessage) {
-            return res.status(400).json({
-                error: 'No user message provided.'
+            return res.status(400).json({ error: 'No user message provided.' });
+        }
+
+        const latestUserTokens = estimateTokens(latestUserMessage);
+        if (latestUserTokens > MAX_INPUT_TOKENS - 500) {
+            return res.status(413).json({
+                error: `Your latest message is too large (${latestUserTokens} tokens). Please shorten it. Server limit is ~${MAX_INPUT_TOKENS} tokens.`
             });
         }
 
-        // ---------- Build token-trimmed messages ----------
-        const finalMessages = [];
+        // ---------- Build system prompt (≤1200 tokens) ----------
+        // Frontend sends: header + "CURRENT FILE CONTENT:\n```...```"
+        const { header, fileContent } = extractFileFromPrompt(systemPrompt);
+        const trimmedFile = smartTruncate(fileContent, MAX_FILE_CHARS);
 
-        // System prompt: trim smartly (keeps file code head+tail if truncated)
-        const trimmedSystem = buildTrimmedSystemPrompt(systemPrompt);
-        if (trimmedSystem) {
-            finalMessages.push({ role: 'system', content: trimmedSystem });
+        let systemText = header
+            ? header
+            : 'You are an expert coding assistant inside a web IDE.';
+
+        if (trimmedFile) {
+            systemText +=
+                '\n\nCURRENT FILE CONTENT (may be partially truncated to fit token limit):\n```\n' +
+                trimmedFile + '\n```';
         }
 
-        // History: recent-first, latest user msg preserved fully
-        const trimmedHistory = buildTrimmedHistory(messages, latestUserMessage);
-        for (const m of trimmedHistory) {
-            finalMessages.push(m);
+        if (systemText.length > MAX_SYSTEM_CHARS) {
+            systemText = systemText.slice(0, MAX_SYSTEM_CHARS)
+                + '\n... [system prompt truncated]';
         }
 
-        // ---------- Final safety cap on total characters ----------
+        // ---------- Build history: last 3 older messages only ----------
+        // Exclude the latest user message (we append it explicitly at end).
+        const olderMessages = messages
+            .slice(0, latestUserIndex)
+            .filter(m => m && typeof m.content === 'string' && m.content.length > 0);
+
+        const recentHistory = olderMessages.slice(-MAX_HISTORY_MESSAGES).map(m => {
+            const cap = m.role === 'assistant' ? 1800 : 2500;
+            const content = m.content.length > cap
+                ? m.content.slice(0, cap) + '\n... [truncated]'
+                : m.content;
+            return { role: m.role, content };
+        });
+
+        // ---------- Assemble final messages ----------
+        const finalMessages = [
+            { role: 'system', content: systemText },
+            ...recentHistory,
+            { role: 'user', content: latestUserMessage }
+        ];
+
+        // ---------- Enforce total input budget (~5500 tokens) ----------
         let totalChars = finalMessages.reduce(
-            (sum, m) => sum + (m.content ? m.content.length : 0),
-            0
+            (s, m) => s + (m.content ? m.content.length : 0), 0
         );
 
-        if (totalChars > MAX_TOTAL_CHARS) {
-            while (finalMessages.length > 2 && totalChars > MAX_TOTAL_CHARS) {
-                // Remove oldest non-system message
-                const idx = finalMessages.findIndex(m => m.role !== 'system');
-                if (idx === -1) break;
-                const removed = finalMessages.splice(idx, 1)[0];
-                totalChars -= removed.content ? removed.content.length : 0;
-            }
+        while (
+            totalChars > MAX_INPUT_CHARS &&
+            finalMessages.length > 2 // keep system + latest user
+        ) {
+            // Remove oldest non-system, non-latest message
+            const idx = finalMessages.findIndex(
+                (m, i) => i > 0 && i < finalMessages.length - 1
+            );
+            if (idx === -1) break;
+            const removed = finalMessages.splice(idx, 1)[0];
+            totalChars -= removed.content.length;
         }
 
-        const estimated = estimateTokens(
-            finalMessages.map((m) => m.content).join('\n')
+        const estimatedInput = estimateTokens(
+            finalMessages.map(m => m.content).join('\n')
         );
+
+        // Safety: if still over budget, shrink file block harder
+        if (estimatedInput > MAX_INPUT_TOKENS) {
+            const smallerFile = smartTruncate(trimmedFile, Math.floor(MAX_FILE_CHARS * 0.6));
+            const rebuiltSystem = (header || 'You are an expert coding assistant inside a web IDE.')
+                + '\n\nCURRENT FILE CONTENT (truncated):\n```\n' + smallerFile + '\n```';
+            finalMessages[0].content = rebuiltSystem.slice(0, MAX_SYSTEM_CHARS);
+        }
+
+        const finalEstimate = estimateTokens(
+            finalMessages.map(m => m.content).join('\n')
+        );
+
         console.log(
-            `[ai-chat] final messages=${finalMessages.length} chars=${totalChars} est_tokens=${estimated}`
+            `[ai-chat] msgs=${finalMessages.length} chars=${totalChars} ` +
+            `est_input_tokens=${finalEstimate} max_out=${MAX_OUTPUT_TOKENS}`
         );
 
         // ---------- Call Groq ----------
@@ -519,7 +511,7 @@ app.post('/api/ai-chat', async (req, res) => {
                 model: 'openai/gpt-oss-120b',
                 messages: finalMessages,
                 temperature: 0.7,
-                max_tokens: 8192
+                max_tokens: MAX_OUTPUT_TOKENS
             },
             {
                 headers: {
