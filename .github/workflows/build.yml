@@ -356,6 +356,114 @@ jobs:
         env:
           BUILD_ID: ${{ github.event.client_payload.buildId }}
 
+      # ============================================================
+      # Google AdMob (Google Mobile Ads SDK) — BUILD-TIME DEPENDENCY
+      # Idempotent: har build pe safe, duplicate entries nahi banati.
+      # NOTE: AdMob App ID / Ad Unit ID / API keys hardcoded NAHI hain.
+      #       Manifest App ID + SDK initialization alag se hoga (baad me).
+      # ============================================================
+      - name: Configure Google Mobile Ads SDK dependency
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ADMOB_SDK_VERSION="23.2.0"
+          ADMOB_DEP_LINE="implementation 'com.google.android.gms:play-services-ads:${ADMOB_SDK_VERSION}'"
+
+          APP_GRADLE="myapp/app/build.gradle"
+
+          if [ ! -f "$APP_GRADLE" ]; then
+            echo "❌ Expected Gradle file not found: $APP_GRADLE"
+            exit 1
+          fi
+          echo "✅ Found app Gradle file: $APP_GRADLE"
+
+          # ---- 1) Add Google Mobile Ads SDK dependency (idempotent) ----
+          if grep -q "com.google.android.gms:play-services-ads" "$APP_GRADLE"; then
+            echo "ℹ️ AdMob SDK dependency already present — skipping."
+          else
+            echo "➕ Adding Google Mobile Ads SDK ${ADMOB_SDK_VERSION} to ${APP_GRADLE}"
+            if grep -qE '^[[:space:]]*dependencies[[:space:]]*\{' "$APP_GRADLE"; then
+              awk -v dep="$ADMOB_DEP_LINE" '
+                BEGIN { done=0 }
+                /^[[:space:]]*dependencies[[:space:]]*\{/ && !done {
+                  print
+                  print "    " dep
+                  done=1
+                  next
+                }
+                { print }
+              ' "$APP_GRADLE" > "$APP_GRADLE.tmp" && mv "$APP_GRADLE.tmp" "$APP_GRADLE"
+            else
+              printf '\n\ndependencies {\n    %s\n}\n' "$ADMOB_DEP_LINE" >> "$APP_GRADLE"
+            fi
+          fi
+
+          # ---- 2) Ensure Google Maven repository is available (idempotent) ----
+          echo "🔧 Ensuring Google Maven repository in myapp/settings.gradle..."
+          SETTINGS_GRADLE="myapp/settings.gradle"
+          if grep -qE 'google\(\)|maven\.google\.com' "$SETTINGS_GRADLE"; then
+            echo "ℹ️ Google Maven repo already present in ${SETTINGS_GRADLE}"
+          else
+            echo "➕ Adding google() to repositories in ${SETTINGS_GRADLE}"
+            awk '
+              BEGIN { done=0 }
+              /repositories[[:space:]]*\{/ && !done {
+                print
+                print "            google()"
+                done=1
+                next
+              }
+              { print }
+            ' "$SETTINGS_GRADLE" > "$SETTINGS_GRADLE.tmp" && mv "$SETTINGS_GRADLE.tmp" "$SETTINGS_GRADLE"
+          fi
+
+          # ---- 3) Also check root build.gradle (defensive) ----
+          ROOT_GRADLE="myapp/build.gradle"
+          if [ -f "$ROOT_GRADLE" ]; then
+            if grep -qE 'google\(\)|maven\.google\.com' "$ROOT_GRADLE"; then
+              echo "ℹ️ Google Maven repo already present in ${ROOT_GRADLE}"
+            else
+              echo "➕ Adding google() to repositories in ${ROOT_GRADLE}"
+              # Only add if a repositories block exists; otherwise skip safely.
+              if grep -qE 'repositories[[:space:]]*\{' "$ROOT_GRADLE"; then
+                awk '
+                  BEGIN { done=0 }
+                  /repositories[[:space:]]*\{/ && !done {
+                    print
+                    print "        google()"
+                    done=1
+                    next
+                  }
+                  { print }
+                ' "$ROOT_GRADLE" > "$ROOT_GRADLE.tmp" && mv "$ROOT_GRADLE.tmp" "$ROOT_GRADLE"
+              fi
+            fi
+          fi
+
+          echo "✅ AdMob SDK configuration step completed."
+
+      - name: Verify AdMob SDK configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "🔎 Verifying AdMob SDK dependency and Google Maven repo..."
+          FOUND_DEP=$(grep -R "com.google.android.gms:play-services-ads" --include='build.gradle' myapp || true)
+          echo "--- AdMob dependency lines ---"
+          echo "${FOUND_DEP:-<none>}"
+          FOUND_REPO=$(grep -R -E 'google\(\)|maven\.google\.com' --include='settings.gradle' --include='build.gradle' myapp || true)
+          echo "--- Google Maven repo lines ---"
+          echo "${FOUND_REPO:-<none>}"
+          if [ -z "$FOUND_DEP" ]; then
+            echo "❌ AdMob SDK dependency was not added!"
+            exit 1
+          fi
+          if [ -z "$FOUND_REPO" ]; then
+            echo "❌ Google Maven repo not found!"
+            exit 1
+          fi
+          echo "✅ Verification passed."
+
       - name: Install Gradle 8.0
         run: |
           curl -fsSL https://services.gradle.org/distributions/gradle-8.0-bin.zip -o /tmp/gradle.zip
