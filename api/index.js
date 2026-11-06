@@ -21,6 +21,115 @@ const github = axios.create({
     timeout: 30000
 });
 
+// ============================================================
+// TOKEN BUDGET HELPERS (Groq TPM 8000 se neeche rehne ke liye)
+// ============================================================
+const MAX_TOTAL_CHARS = 22000;       // overall safety cap (~5500 tokens)
+const MAX_SYSTEM_CHARS = 3000;       // system prompt cap (~750 tokens)
+const MAX_FILE_CONTEXT_CHARS = 9000; // file content cap (~2250 tokens)
+const MAX_HISTORY_CHARS = 6000;      // conversation history cap (~1500 tokens)
+const MAX_USER_MSG_CHARS = 8000;     // latest user message cap (rarely hit)
+
+function estimateTokens(str) {
+    if (!str) return 0;
+    return Math.ceil(String(str).length / 3.5);
+}
+
+function smartTruncateFile(code, maxChars) {
+    if (!code) return '';
+    const s = String(code);
+    if (s.length <= maxChars) return s;
+    const headLen = Math.floor(maxChars * 0.6);
+    const tailLen = Math.floor(maxChars * 0.35);
+    const head = s.slice(0, headLen);
+    const tail = s.slice(s.length - tailLen);
+    return (
+        head +
+        '\n\n/* ... [middle of file truncated to fit token limit] ... */\n\n' +
+        tail
+    );
+}
+
+function truncateMessageContent(content, maxChars) {
+    if (!content) return '';
+    const s = String(content);
+    if (s.length <= maxChars) return s;
+    return s.slice(0, maxChars) + '\n... [truncated]';
+}
+
+// Keep newest messages first, drop oldest when over budget.
+// Latest user message is ALWAYS preserved fully.
+function buildTrimmedHistory(history, latestUserMessage) {
+    if (!Array.isArray(history)) history = [];
+
+    const filtered = history.filter(
+        (m) => m && typeof m === 'object' && typeof m.content === 'string'
+    );
+
+    let used = 0;
+    const kept = [];
+
+    for (let i = filtered.length - 1; i >= 0; i--) {
+        const msg = filtered[i];
+        const isLatestUser =
+            i === filtered.length - 1 && msg.role === 'user';
+
+        const perMsgCap = msg.role === 'assistant' ? 2500 : MAX_USER_MSG_CHARS;
+        let content = isLatestUser
+            ? msg.content
+            : truncateMessageContent(msg.content, perMsgCap);
+
+        const cost = content.length;
+        if (used + cost > MAX_HISTORY_CHARS && kept.length > 0) {
+            break;
+        }
+        if (used + cost > MAX_HISTORY_CHARS && kept.length === 0) {
+            content = content.slice(0, MAX_HISTORY_CHARS);
+        }
+        kept.unshift({ role: msg.role, content });
+        used += content.length;
+    }
+
+    if (latestUserMessage) {
+        const last = kept[kept.length - 1];
+        if (!last || last.role !== 'user' || last.content !== latestUserMessage) {
+            while (
+                kept.length > 0 &&
+                kept[kept.length - 1].role === 'user' &&
+                kept[kept.length - 1].content === latestUserMessage
+            ) {
+                kept.pop();
+            }
+            kept.push({ role: 'user', content: latestUserMessage });
+        }
+    }
+
+    return kept;
+}
+
+function buildTrimmedSystemPrompt(systemPrompt) {
+    if (!systemPrompt) {
+        return 'You are an expert coding assistant inside a web IDE.';
+    }
+    const s = String(systemPrompt);
+
+    // Try to smart-trim the embedded file content block, if present.
+    const fileBlockRegex = /CURRENT FILE CONTENT[\s\S]*?```\s*([\s\S]*?)```/i;
+    const match = s.match(fileBlockRegex);
+
+    if (match && match[1] && match[1].length > MAX_FILE_CONTEXT_CHARS) {
+        const trimmedFile = smartTruncateFile(match[1], MAX_FILE_CONTEXT_CHARS);
+        return s.replace(match[0],
+            'CURRENT FILE CONTENT (may be partially truncated):\n```\n' +
+            trimmedFile +
+            '\n```'
+        );
+    }
+
+    if (s.length <= MAX_SYSTEM_CHARS) return s;
+    return s.slice(0, MAX_SYSTEM_CHARS) + '\n... [system prompt truncated]';
+}
+
 // Convert nested project files into individual paths.
 function flattenFiles(obj, prefix = '', output = []) {
     if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
@@ -343,7 +452,7 @@ app.post('/api/ai-chat', async (req, res) => {
             });
         }
 
-        const { messages } = req.body || {};
+        const { messages, systemPrompt } = req.body || {};
 
         if (!Array.isArray(messages) || messages.length === 0) {
             return res.status(400).json({
@@ -351,11 +460,64 @@ app.post('/api/ai-chat', async (req, res) => {
             });
         }
 
+        // ---------- Extract latest user message (NEVER truncate) ----------
+        let latestUserMessage = '';
+        for (let i = messages.length - 1; i >= 0; i--) {
+            if (messages[i] && messages[i].role === 'user' && messages[i].content) {
+                latestUserMessage = String(messages[i].content);
+                break;
+            }
+        }
+        if (!latestUserMessage) {
+            return res.status(400).json({
+                error: 'No user message provided.'
+            });
+        }
+
+        // ---------- Build token-trimmed messages ----------
+        const finalMessages = [];
+
+        // System prompt: trim smartly (keeps file code head+tail if truncated)
+        const trimmedSystem = buildTrimmedSystemPrompt(systemPrompt);
+        if (trimmedSystem) {
+            finalMessages.push({ role: 'system', content: trimmedSystem });
+        }
+
+        // History: recent-first, latest user msg preserved fully
+        const trimmedHistory = buildTrimmedHistory(messages, latestUserMessage);
+        for (const m of trimmedHistory) {
+            finalMessages.push(m);
+        }
+
+        // ---------- Final safety cap on total characters ----------
+        let totalChars = finalMessages.reduce(
+            (sum, m) => sum + (m.content ? m.content.length : 0),
+            0
+        );
+
+        if (totalChars > MAX_TOTAL_CHARS) {
+            while (finalMessages.length > 2 && totalChars > MAX_TOTAL_CHARS) {
+                // Remove oldest non-system message
+                const idx = finalMessages.findIndex(m => m.role !== 'system');
+                if (idx === -1) break;
+                const removed = finalMessages.splice(idx, 1)[0];
+                totalChars -= removed.content ? removed.content.length : 0;
+            }
+        }
+
+        const estimated = estimateTokens(
+            finalMessages.map((m) => m.content).join('\n')
+        );
+        console.log(
+            `[ai-chat] final messages=${finalMessages.length} chars=${totalChars} est_tokens=${estimated}`
+        );
+
+        // ---------- Call Groq ----------
         const response = await axios.post(
             'https://api.groq.com/openai/v1/chat/completions',
             {
                 model: 'openai/gpt-oss-120b',
-                messages,
+                messages: finalMessages,
                 temperature: 0.7,
                 max_tokens: 8192
             },
