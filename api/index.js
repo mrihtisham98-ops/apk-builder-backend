@@ -335,7 +335,7 @@ app.get('/api/build-status/:buildId', async (req, res) => {
 // Secure Groq AI Chat Endpoint
 app.post('/api/ai-chat', async (req, res) => {
     try {
-        const GROQ_API_KEY = process.env.GROQ_API_KEY;
+        const GROQ_API_KEY = process.env.Ai_Api_key;
 
         if (!GROQ_API_KEY) {
             return res.status(500).json({
