@@ -544,4 +544,4 @@ jobs:
               --method DELETE \
               "repos/${GITHUB_REPOSITORY}/git/refs/heads/${BUILD_REF}" \
               || echo "Temporary branch was already deleted."
-          fi
+          fi 
