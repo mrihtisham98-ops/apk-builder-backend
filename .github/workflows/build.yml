@@ -372,7 +372,8 @@ jobs:
           BUILD_ID: ${{ github.event.client_payload.buildId }}
 
       # ============================================================
-      # Google AdMob (Google Mobile Ads SDK) — TEMPORARILY DISABLED
+      # Google AdMob (Google Mobile Ads SDK) — OLD DISABLED STEPS
+      # Preserved from original workflow.
       # ============================================================
       - name: Configure Google Mobile Ads SDK dependency
         if: false
@@ -391,7 +392,6 @@ jobs:
           fi
           echo "✅ Found app Gradle file: $APP_GRADLE"
 
-          # ---- 1) Add Google Mobile Ads SDK dependency (idempotent) ----
           if grep -q "com.google.android.gms:play-services-ads" "$APP_GRADLE"; then
             echo "ℹ️ AdMob SDK dependency already present — skipping."
           else
@@ -412,13 +412,12 @@ jobs:
             fi
           fi
 
-          # ---- 2) Ensure Google Maven repository is available (idempotent) ----
-          echo "🔧 Ensuring Google Maven repository in myapp/settings.gradle..."
+          echo "🔧 Ensuring Google Maven repository..."
           SETTINGS_GRADLE="myapp/settings.gradle"
           if grep -qE 'google\(\)|maven\.google\.com' "$SETTINGS_GRADLE"; then
-            echo "ℹ️ Google Maven repo already present in ${SETTINGS_GRADLE}"
+            echo "ℹ️ Google Maven repo already present."
           else
-            echo "➕ Adding google() to repositories in ${SETTINGS_GRADLE}"
+            echo "➕ Adding google() to repositories."
             awk '
               BEGIN { done=0 }
               /repositories[[:space:]]*\{/ && !done {
@@ -431,30 +430,7 @@ jobs:
             ' "$SETTINGS_GRADLE" > "$SETTINGS_GRADLE.tmp" && mv "$SETTINGS_GRADLE.tmp" "$SETTINGS_GRADLE"
           fi
 
-          # ---- 3) Also check root build.gradle (defensive) ----
-          ROOT_GRADLE="myapp/build.gradle"
-          if [ -f "$ROOT_GRADLE" ]; then
-            if grep -qE 'google\(\)|maven\.google\.com' "$ROOT_GRADLE"; then
-              echo "ℹ️ Google Maven repo already present in ${ROOT_GRADLE}"
-            else
-              echo "➕ Adding google() to repositories in ${ROOT_GRADLE}"
-              # Only add if a repositories block exists; otherwise skip safely.
-              if grep -qE 'repositories[[:space:]]*\{' "$ROOT_GRADLE"; then
-                awk '
-                  BEGIN { done=0 }
-                  /repositories[[:space:]]*\{/ && !done {
-                    print
-                    print "        google()"
-                    done=1
-                    next
-                  }
-                  { print }
-                ' "$ROOT_GRADLE" > "$ROOT_GRADLE.tmp" && mv "$ROOT_GRADLE.tmp" "$ROOT_GRADLE"
-              fi
-            fi
-          fi
-
-          echo "✅ AdMob SDK configuration step completed."
+          echo "✅ Old AdMob SDK configuration step completed."
 
       - name: Verify AdMob SDK configuration
         if: false
@@ -477,6 +453,549 @@ jobs:
             exit 1
           fi
           echo "✅ Verification passed."
+
+      # ============================================================
+      # NEW CONDITIONAL ADMOB INTEGRATION
+      # Runs only when admob.config.json exists and enabled is true.
+      # ============================================================
+      - name: Configure AdMob SDK and Android Java Bridge
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ASSET_CONFIG="myapp/app/src/main/assets/admob.config.json"
+
+          if [ ! -f "$ASSET_CONFIG" ]; then
+            echo "AdMob config not found. Building without AdMob."
+            exit 0
+          fi
+
+          ENABLED=$(python3 -c "import json; print(str(json.load(open('$ASSET_CONFIG')).get('enabled', False)).lower())")
+
+          if [ "$ENABLED" != "true" ]; then
+            echo "AdMob is disabled. Building without AdMob SDK."
+            exit 0
+          fi
+
+          echo "AdMob enabled. Configuring Google Mobile Ads SDK."
+
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          config_path = Path("myapp/app/src/main/assets/admob.config.json")
+          config = json.loads(config_path.read_text(encoding="utf-8"))
+
+          app_id = config.get("appId", "").strip()
+
+          if not app_id:
+              raise SystemExit("ERROR: AdMob App ID is missing.")
+
+          if not re.fullmatch(r"ca-app-pub-[0-9]+~[0-9]+", app_id):
+              raise SystemExit("ERROR: Invalid AdMob App ID format.")
+
+          android_ns = "http://schemas.android.com/apk/res/android"
+          manifest_path = Path("myapp/app/src/main/AndroidManifest.xml")
+
+          tree = ET.parse(manifest_path)
+          root = tree.getroot()
+          application = root.find("application")
+
+          if application is None:
+              raise SystemExit("ERROR: Android application element not found.")
+
+          for item in list(application):
+              if item.tag == "meta-data" and item.get(
+                  f"{{{android_ns}}}name"
+              ) == "com.google.android.gms.ads.APPLICATION_ID":
+                  application.remove(item)
+
+          metadata = ET.SubElement(application, "meta-data")
+          metadata.set(
+              f"{{{android_ns}}}name",
+              "com.google.android.gms.ads.APPLICATION_ID"
+          )
+          metadata.set(
+              f"{{{android_ns}}}value",
+              app_id
+          )
+
+          tree.write(
+              manifest_path,
+              encoding="utf-8",
+              xml_declaration=True
+          )
+
+          print("AdMob App ID added to AndroidManifest.xml.")
+
+          package_name = root.get("package")
+          java_dir = Path("myapp/app/src/main/java") / Path(
+              *package_name.split(".")
+          )
+
+          main_activity = java_dir / "MainActivity.java"
+          source = main_activity.read_text(encoding="utf-8")
+
+          bridge_line = (
+              'webView.addJavascriptInterface('
+              'new AdMobBridge(this, webView), "AndroidAds");'
+          )
+
+          if "new AdMobBridge(this, webView)" not in source:
+              source = source.replace(
+                  'webView.loadUrl("file:///android_asset/index.html");',
+                  bridge_line + '\n                  '
+                  'webView.loadUrl("file:///android_asset/index.html");'
+              )
+
+          main_activity.write_text(source, encoding="utf-8")
+
+          bridge_code = r'''
+          package PACKAGE_NAME;
+
+          import android.app.Activity;
+          import android.graphics.Color;
+          import android.view.Gravity;
+          import android.view.View;
+          import android.view.ViewGroup;
+          import android.widget.FrameLayout;
+          import android.widget.TextView;
+          import android.webkit.JavascriptInterface;
+          import android.webkit.WebView;
+
+          import com.google.android.gms.ads.AdRequest;
+          import com.google.android.gms.ads.AdSize;
+          import com.google.android.gms.ads.AdView;
+          import com.google.android.gms.ads.MobileAds;
+          import com.google.android.gms.ads.LoadAdError;
+          import com.google.android.gms.ads.FullScreenContentCallback;
+          import com.google.android.gms.ads.interstitial.InterstitialAd;
+          import com.google.android.gms.ads.interstitial.InterstitialAdLoadCallback;
+          import com.google.android.gms.ads.rewarded.RewardedAd;
+          import com.google.android.gms.ads.rewarded.RewardedAdLoadCallback;
+          import com.google.android.gms.ads.rewarded.RewardItem;
+          import com.google.android.gms.ads.nativead.NativeAd;
+          import com.google.android.gms.ads.nativead.NativeAdView;
+          import com.google.android.gms.ads.nativead.NativeAdOptions;
+          import com.google.android.gms.ads.nativead.NativeAd.OnNativeAdLoadedListener;
+          import com.google.android.gms.ads.AdListener;
+          import com.google.android.gms.ads.AdLoader;
+          import com.google.android.gms.ads.appopen.AppOpenAd;
+          import com.google.android.gms.ads.appopen.AppOpenAd.AppOpenAdLoadCallback;
+
+          import org.json.JSONObject;
+
+          public class AdMobBridge {
+              private final Activity activity;
+              private final WebView webView;
+
+              private String bannerId = "";
+              private String interstitialId = "";
+              private String rewardedId = "";
+              private String nativeId = "";
+              private String appOpenId = "";
+
+              private AdView bannerView;
+              private InterstitialAd interstitialAd;
+              private RewardedAd rewardedAd;
+              private NativeAd nativeAd;
+              private AppOpenAd appOpenAd;
+
+              private boolean initialized = false;
+              private boolean appOpenShown = false;
+
+              public AdMobBridge(Activity activity, WebView webView) {
+                  this.activity = activity;
+                  this.webView = webView;
+              }
+
+              @JavascriptInterface
+              public void configure(String json) {
+                  try {
+                      JSONObject cfg = new JSONObject(json);
+
+                      bannerId = cfg.optString("bannerId", "");
+                      interstitialId = cfg.optString("interstitialId", "");
+                      rewardedId = cfg.optString("rewardedId", "");
+                      nativeId = cfg.optString("nativeId", "");
+                      appOpenId = cfg.optString("appOpenId", "");
+
+                      activity.runOnUiThread(() -> {
+                          if (initialized) return;
+
+                          initialized = true;
+
+                          MobileAds.initialize(activity, status -> {
+                              loadInterstitial();
+                              loadRewarded();
+                              loadNative();
+                              loadAppOpen();
+                          });
+                      });
+
+                  } catch (Exception e) {
+                      android.util.Log.e("AdMobBridge", "Config error", e);
+                  }
+              }
+
+              @JavascriptInterface
+              public void initialize() {
+                  // Initialization is performed by configure().
+              }
+
+              @JavascriptInterface
+              public boolean isReady() {
+                  return initialized;
+              }
+
+              @JavascriptInterface
+              public void showBanner() {
+                  activity.runOnUiThread(() -> {
+                      if (bannerId.isEmpty()) return;
+
+                      if (bannerView != null) {
+                          bannerView.setVisibility(View.VISIBLE);
+                          return;
+                      }
+
+                      bannerView = new AdView(activity);
+                      bannerView.setAdUnitId(bannerId);
+                      bannerView.setAdSize(AdSize.BANNER);
+
+                      FrameLayout.LayoutParams params =
+                          new FrameLayout.LayoutParams(
+                              ViewGroup.LayoutParams.MATCH_PARENT,
+                              ViewGroup.LayoutParams.WRAP_CONTENT,
+                              Gravity.BOTTOM
+                          );
+
+                      activity.addContentView(bannerView, params);
+                      bannerView.loadAd(new AdRequest.Builder().build());
+                  });
+              }
+
+              @JavascriptInterface
+              public void hideBanner() {
+                  activity.runOnUiThread(() -> {
+                      if (bannerView != null) {
+                          bannerView.setVisibility(View.GONE);
+                      }
+                  });
+              }
+
+              private void loadInterstitial() {
+                  if (interstitialId.isEmpty()) return;
+
+                  InterstitialAd.load(
+                      activity,
+                      interstitialId,
+                      new AdRequest.Builder().build(),
+                      new InterstitialAdLoadCallback() {
+                          @Override
+                          public void onAdLoaded(InterstitialAd ad) {
+                              interstitialAd = ad;
+                          }
+
+                          @Override
+                          public void onAdFailedToLoad(LoadAdError error) {
+                              interstitialAd = null;
+                          }
+                      }
+                  );
+              }
+
+              @JavascriptInterface
+              public void showInterstitial() {
+                  activity.runOnUiThread(() -> {
+                      if (interstitialAd == null) {
+                          loadInterstitial();
+                          return;
+                      }
+
+                      interstitialAd.setFullScreenContentCallback(
+                          new FullScreenContentCallback() {
+                              @Override
+                              public void onAdDismissedFullScreenContent() {
+                                  interstitialAd = null;
+                                  loadInterstitial();
+                              }
+
+                              @Override
+                              public void onAdFailedToShowFullScreenContent(
+                                      com.google.android.gms.ads.AdError error) {
+                                  interstitialAd = null;
+                                  loadInterstitial();
+                              }
+                          }
+                      );
+
+                      interstitialAd.show(activity);
+                  });
+              }
+
+              private void loadRewarded() {
+                  if (rewardedId.isEmpty()) return;
+
+                  RewardedAd.load(
+                      activity,
+                      rewardedId,
+                      new AdRequest.Builder().build(),
+                      new RewardedAdLoadCallback() {
+                          @Override
+                          public void onAdLoaded(RewardedAd ad) {
+                              rewardedAd = ad;
+                          }
+
+                          @Override
+                          public void onAdFailedToLoad(LoadAdError error) {
+                              rewardedAd = null;
+                          }
+                      }
+                  );
+              }
+
+              @JavascriptInterface
+              public void showRewarded() {
+                  activity.runOnUiThread(() -> {
+                      if (rewardedAd == null) {
+                          loadRewarded();
+                          return;
+                      }
+
+                      rewardedAd.setFullScreenContentCallback(
+                          new FullScreenContentCallback() {
+                              @Override
+                              public void onAdDismissedFullScreenContent() {
+                                  rewardedAd = null;
+                                  loadRewarded();
+                              }
+                          }
+                      );
+
+                      rewardedAd.show(activity, rewardItem -> {
+                          int amount = rewardItem.getAmount();
+                          String type = rewardItem.getType();
+
+                          webView.post(() -> webView.evaluateJavascript(
+                              "if(window.onAdRewardEarned){"
+                              + "window.onAdRewardEarned("
+                              + amount + ",'"
+                              + type.replace("'", "") + "');}",
+                              null
+                          ));
+                      });
+                  });
+              }
+
+              private void loadNative() {
+                  if (nativeId.isEmpty()) return;
+
+                  AdLoader loader = new AdLoader.Builder(activity, nativeId)
+                      .forNativeAd(ad -> {
+                          if (nativeAd != null) {
+                              nativeAd.destroy();
+                          }
+                          nativeAd = ad;
+                      })
+                      .withNativeAdOptions(new NativeAdOptions.Builder().build())
+                      .withAdListener(new AdListener() {
+                          @Override
+                          public void onAdFailedToLoad(LoadAdError error) {
+                              nativeAd = null;
+                          }
+                      })
+                      .build();
+
+                  loader.loadAd(new AdRequest.Builder().build());
+              }
+
+              @JavascriptInterface
+              public void showNative() {
+                  activity.runOnUiThread(() -> {
+                      if (nativeAd == null) {
+                          loadNative();
+                          return;
+                      }
+
+                      NativeAdView adView = new NativeAdView(activity);
+                      FrameLayout container = new FrameLayout(activity);
+                      container.setBackgroundColor(Color.WHITE);
+                      container.setPadding(12, 8, 12, 8);
+
+                      TextView headline = new TextView(activity);
+                      headline.setTextColor(Color.BLACK);
+                      headline.setTextSize(16);
+                      headline.setMaxLines(2);
+
+                      TextView body = new TextView(activity);
+                      body.setTextColor(Color.DKGRAY);
+                      body.setTextSize(13);
+
+                      TextView button = new TextView(activity);
+                      button.setTextColor(Color.WHITE);
+                      button.setBackgroundColor(Color.rgb(30, 100, 210));
+                      button.setPadding(18, 10, 18, 10);
+
+                      FrameLayout.LayoutParams headlineParams =
+                          new FrameLayout.LayoutParams(
+                              ViewGroup.LayoutParams.MATCH_PARENT,
+                              ViewGroup.LayoutParams.WRAP_CONTENT
+                          );
+
+                      FrameLayout.LayoutParams bodyParams =
+                          new FrameLayout.LayoutParams(
+                              ViewGroup.LayoutParams.MATCH_PARENT,
+                              ViewGroup.LayoutParams.WRAP_CONTENT
+                          );
+                      bodyParams.topMargin = 48;
+
+                      FrameLayout.LayoutParams buttonParams =
+                          new FrameLayout.LayoutParams(
+                              ViewGroup.LayoutParams.WRAP_CONTENT,
+                              ViewGroup.LayoutParams.WRAP_CONTENT
+                          );
+                      buttonParams.topMargin = 92;
+
+                      container.addView(headline, headlineParams);
+                      container.addView(body, bodyParams);
+                      container.addView(button, buttonParams);
+
+                      adView.addView(container);
+                      adView.setHeadlineView(headline);
+                      adView.setBodyView(body);
+                      adView.setCallToActionView(button);
+
+                      headline.setText(nativeAd.getHeadline());
+                      body.setText(nativeAd.getBody());
+                      button.setText(nativeAd.getCallToAction());
+
+                      adView.setNativeAd(nativeAd);
+
+                      FrameLayout.LayoutParams params =
+                          new FrameLayout.LayoutParams(
+                              ViewGroup.LayoutParams.MATCH_PARENT,
+                              ViewGroup.LayoutParams.WRAP_CONTENT,
+                              Gravity.BOTTOM
+                          );
+
+                      activity.addContentView(adView, params);
+                  });
+              }
+
+              private void loadAppOpen() {
+                  if (appOpenId.isEmpty()) return;
+
+                  AppOpenAd.load(
+                      activity,
+                      appOpenId,
+                      new AdRequest.Builder().build(),
+                      new AppOpenAdLoadCallback() {
+                          @Override
+                          public void onAdLoaded(AppOpenAd ad) {
+                              appOpenAd = ad;
+
+                              if (!appOpenShown) {
+                                  appOpenShown = true;
+                                  showAppOpenInternal();
+                              }
+                          }
+
+                          @Override
+                          public void onAdFailedToLoad(LoadAdError error) {
+                              appOpenAd = null;
+                          }
+                      }
+                  );
+              }
+
+              private void showAppOpenInternal() {
+                  if (appOpenAd == null) {
+                      loadAppOpen();
+                      return;
+                  }
+
+                  appOpenAd.setFullScreenContentCallback(
+                      new FullScreenContentCallback() {
+                          @Override
+                          public void onAdDismissedFullScreenContent() {
+                              appOpenAd = null;
+                              loadAppOpen();
+                          }
+
+                          @Override
+                          public void onAdFailedToShowFullScreenContent(
+                                  com.google.android.gms.ads.AdError error) {
+                              appOpenAd = null;
+                              loadAppOpen();
+                          }
+                      }
+                  );
+
+                  appOpenAd.show(activity);
+              }
+
+              @JavascriptInterface
+              public void showAppOpen() {
+                  activity.runOnUiThread(this::showAppOpenInternal);
+              }
+          }
+          '''
+
+          bridge_code = bridge_code.replace("PACKAGE_NAME", package_name)
+
+          bridge_file = java_dir / "AdMobBridge.java"
+          bridge_file.write_text(bridge_code, encoding="utf-8")
+
+          print("AdMob Java bridge created.")
+          print("AdMob App ID configured.")
+          print("AdMob enabled for this build.")
+          PY
+
+          # Add Google Mobile Ads SDK dependency only for enabled builds.
+          if ! grep -q "play-services-ads" myapp/app/build.gradle; then
+            cat >> myapp/app/build.gradle <<'EOF'
+
+          dependencies {
+              implementation 'com.google.android.gms:play-services-ads:23.2.0'
+          }
+          EOF
+          fi
+
+          echo "AdMob SDK and Java bridge configured."
+
+      # ============================================================
+      # Verify AdMob configuration only if AdMob is enabled.
+      # ============================================================
+      - name: Verify New AdMob Integration
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          CONFIG="myapp/app/src/main/assets/admob.config.json"
+
+          if [ ! -f "$CONFIG" ]; then
+            echo "AdMob is not configured. Skipping verification."
+            exit 0
+          fi
+
+          ENABLED=$(python3 -c "import json; print(str(json.load(open('$CONFIG')).get('enabled', False)).lower())")
+
+          if [ "$ENABLED" != "true" ]; then
+            echo "AdMob disabled. Skipping verification."
+            exit 0
+          fi
+
+          grep -q "play-services-ads" myapp/app/build.gradle
+          grep -q "AdMobBridge" myapp/app/src/main/java/*/*/*/AdMobBridge.java 2>/dev/null || \
+          find myapp/app/src/main/java -name "AdMobBridge.java" | grep -q .
+
+          grep -q "com.google.android.gms.ads.APPLICATION_ID" \
+            myapp/app/src/main/AndroidManifest.xml
+
+          echo "AdMob integration verification passed."
 
       # ============================================================
       # AndroidX (ADDED) — Jetifier + AndroidX support
@@ -533,6 +1052,7 @@ jobs:
 
       # ============================================================
       # Delete Temporary Build Branch (ADDED — fallback, github.token)
+      # Original fallback step preserved.
       # ============================================================
       - name: Delete Temporary Build Branch
         env:
