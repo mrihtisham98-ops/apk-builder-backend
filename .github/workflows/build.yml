@@ -464,6 +464,16 @@ jobs:
           fi
           echo "✅ Verification passed."
 
+      # ============================================================
+      # AndroidX (ADDED) — Jetifier + AndroidX support
+      # ============================================================
+      - name: Enable AndroidX
+        run: |
+          cat > myapp/gradle.properties <<'EOF'
+          android.useAndroidX=true
+          android.enableJetifier=true
+          EOF
+
       - name: Install Gradle 8.0
         run: |
           curl -fsSL https://services.gradle.org/distributions/gradle-8.0-bin.zip -o /tmp/gradle.zip
@@ -505,4 +515,3 @@ jobs:
               --method DELETE \
               "repos/${GITHUB_REPOSITORY}/git/refs/heads/${BUILD_REF}" \
               || echo "Temporary branch was already deleted."
-          fi
