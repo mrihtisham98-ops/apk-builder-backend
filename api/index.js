@@ -1,8 +1,10 @@
+
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const crypto = require('crypto');
 const { applyAdMobIntegration } = require('../lib/admob-injector');
+
 const app = express();
 
 app.use(cors());
@@ -93,7 +95,7 @@ app.post('/api/cloud-build-apk', async (req, res) => {
             });
         }
 
-        const projectFiles = flattenFiles(files);
+        let projectFiles = flattenFiles(files);
 
         if (!projectFiles.some(file => file.path === 'index.html')) {
             return res.status(400).json({
@@ -101,6 +103,28 @@ app.post('/api/cloud-build-apk', async (req, res) => {
                 error: 'Project must contain a root index.html file.'
             });
         }
+
+        // ===== AdMob Integration START =====
+
+        // Convert flattened files into the format required by the injector.
+        const admobFiles = {};
+
+        for (const file of projectFiles) {
+            admobFiles[file.path] = file.content;
+        }
+
+        // Apply AdMob integration.
+        const adMobResult = applyAdMobIntegration(admobFiles, adMob);
+
+        console.log('[AdMob]', adMobResult.reason);
+
+        // Convert modified files back into upload format.
+        projectFiles = Object.entries(admobFiles).map(([path, content]) => ({
+            path,
+            content
+        }));
+
+        // ===== AdMob Integration END =====
 
         const buildId = crypto.randomUUID();
         branch = `build-${buildId}`;
