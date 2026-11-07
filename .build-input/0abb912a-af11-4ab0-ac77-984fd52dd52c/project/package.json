@@ -1,0 +1,10 @@
+{
+ "name": "my-web-app",
+ "version": "1.0.0",
+ "description": "Native Web App & Game Project",
+ "main": "index.html",
+ "scripts": {
+ "start": "live-server"
+ },
+ "dependencies": {}
+}
