@@ -1,3 +1,4 @@
+
 name: Build Real APK
 
 run-name: Build APK ${{ github.event.client_payload.buildId }}
@@ -371,12 +372,10 @@ jobs:
           BUILD_ID: ${{ github.event.client_payload.buildId }}
 
       # ============================================================
-      # Google AdMob (Google Mobile Ads SDK) — BUILD-TIME DEPENDENCY
-      # Idempotent: har build pe safe, duplicate entries nahi banati.
-      # NOTE: AdMob App ID / Ad Unit ID / API keys hardcoded NAHI hain.
-      #       Manifest App ID + SDK initialization alag se hoga (baad me).
+      # Google AdMob (Google Mobile Ads SDK) — TEMPORARILY DISABLED
       # ============================================================
       - name: Configure Google Mobile Ads SDK dependency
+        if: false
         shell: bash
         run: |
           set -euo pipefail
@@ -458,6 +457,7 @@ jobs:
           echo "✅ AdMob SDK configuration step completed."
 
       - name: Verify AdMob SDK configuration
+        if: false
         shell: bash
         run: |
           set -euo pipefail
@@ -544,4 +544,4 @@ jobs:
               --method DELETE \
               "repos/${GITHUB_REPOSITORY}/git/refs/heads/${BUILD_REF}" \
               || echo "Temporary branch was already deleted."
-          fi 
+          fi
