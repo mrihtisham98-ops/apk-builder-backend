@@ -515,3 +515,19 @@ jobs:
               --method DELETE \
               "repos/${GITHUB_REPOSITORY}/git/refs/heads/${BUILD_REF}" \
               || echo "Temporary branch was already deleted."
+          fi
+
+      # ============================================================
+      # Delete Temporary Build Branch (ADDED — fallback, github.token)
+      # ============================================================
+      - name: Delete Temporary Build Branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_REF: ${{ github.event.client_payload.ref }}
+        run: |
+          if [ -n "$BUILD_REF" ]; then
+            gh api \
+              --method DELETE \
+              "repos/${GITHUB_REPOSITORY}/git/refs/heads/${BUILD_REF}" \
+              || echo "Temporary branch was already deleted."
+          fi
