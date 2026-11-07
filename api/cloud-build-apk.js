@@ -1,0 +1,1 @@
+const { applyAdMobIntegration } = require('../lib/admob-injector');
