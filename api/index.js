@@ -75,6 +75,7 @@ app.post('/api/cloud-build-apk', async (req, res) => {
         }
 
         const { appName, packageName, iconBase64: appIcon, files } = req.body;
+        const adMob = req.body.adMob || { enabled: false };
 
         if (!appName || !packageName || !files) {
             return res.status(400).json({
