@@ -77,6 +77,20 @@ jobs:
 
           shutil.copytree(project, assets, dirs_exist_ok=True)
 
+          # Verify copied HTML project assets
+          all_files = [p for p in assets.rglob("*") if p.is_file()]
+          total_size = sum(p.stat().st_size for p in all_files)
+
+          print("========== ASSET VERIFICATION ==========")
+          print("Total files copied:", len(all_files))
+          print("Total asset size:", round(total_size / (1024 * 1024), 2), "MB")
+          print("Index HTML exists:", (assets / "index.html").is_file())
+
+          for file in all_files[:50]:
+              print("ASSET:", file.relative_to(assets))
+
+          print("========================================")
+
           # Create Android manifest.
           android_ns = "http://schemas.android.com/apk/res/android"
           ET.register_namespace("android", android_ns)
