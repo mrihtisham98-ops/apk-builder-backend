@@ -2,7 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const crypto = require('crypto');
-
+const { applyAdMobIntegration } = require('../lib/admob-injector');
 const app = express();
 
 app.use(cors());
