@@ -145,9 +145,9 @@ app.post('/api/cloud-build-apk', async (req, res) => {
             const bytes = Buffer.byteLength(file.content, 'utf8');
             totalBytes += bytes;
 
-            if (totalBytes > 4 * 1024 * 1024) {
+            if (totalBytes > 50 * 1024 * 1024) {
                 throw new Error(
-                    'Project is too large for this upload endpoint. Maximum supported size is 4 MB.'
+                    'Project is too large for this upload endpoint. Maximum supported size is 50 MB.'
                 );
             }
 
@@ -177,8 +177,8 @@ app.post('/api/cloud-build-apk', async (req, res) => {
             const iconBuffer = Buffer.from(match[2], 'base64');
             totalBytes += iconBuffer.length;
 
-            if (totalBytes > 4 * 1024 * 1024) {
-                throw new Error('Project and icon exceed the 4 MB upload limit.');
+            if (totalBytes > 50 * 1024 * 1024) {
+                throw new Error('Project and icon exceed the 50 MB upload limit.');
             }
 
             const extension = match[1] === 'jpeg' ? 'jpg' : match[1];
