@@ -1,4 +1,3 @@
-
 name: Build Real APK
 
 run-name: Build APK ${{ github.event.client_payload.buildId }}
@@ -499,6 +498,9 @@ jobs:
 
           android_ns = "http://schemas.android.com/apk/res/android"
           manifest_path = Path("myapp/app/src/main/AndroidManifest.xml")
+
+          # ✅ YEH NAYI LINE ADD KAR DI GAYI HAI:
+          ET.register_namespace("android", android_ns)
 
           tree = ET.parse(manifest_path)
           root = tree.getroot()
