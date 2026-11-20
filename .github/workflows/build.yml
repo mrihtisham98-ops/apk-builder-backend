@@ -263,6 +263,7 @@ jobs:
               from PIL import Image
 
               image = Image.open(icon_file).convert("RGBA")
+              image.load()
 
               for folder, size in [
                   ("mipmap-mdpi", 48),
