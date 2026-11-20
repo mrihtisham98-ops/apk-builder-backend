@@ -106,19 +106,16 @@ app.post('/api/cloud-build-apk', async (req, res) => {
 
         // ===== AdMob Integration START =====
 
-        // Convert flattened files into the format required by the injector.
         const admobFiles = {};
 
         for (const file of projectFiles) {
             admobFiles[file.path] = file.content;
         }
 
-        // Apply AdMob integration.
         const adMobResult = applyAdMobIntegration(admobFiles, adMob);
 
         console.log('[AdMob]', adMobResult.reason);
 
-        // Convert modified files back into upload format.
         projectFiles = Object.entries(admobFiles).map(([path, content]) => ({
             path,
             content
@@ -409,6 +406,118 @@ app.post('/api/ai-chat', async (req, res) => {
         });
     }
 });
+
+// ===== OpenAI AI Chat Endpoint START =====
+// OpenAI Chat Completions API.
+// Default model can be changed using OPENAI_MODEL in Vercel.
+
+app.post('/api/openai-chat', async (req, res) => {
+    try {
+        const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+        const OPENAI_MODEL = (
+            process.env.OPENAI_MODEL || 'gpt-6-luna'
+        ).trim();
+
+        if (!OPENAI_API_KEY) {
+            return res.status(500).json({
+                error: 'OPENAI_API_KEY is not configured on server.',
+                provider: 'openai'
+            });
+        }
+
+        const { messages } = req.body || {};
+
+        if (!Array.isArray(messages) || messages.length === 0) {
+            return res.status(400).json({
+                error: 'Messages are required.',
+                provider: 'openai'
+            });
+        }
+
+        if (messages.length > 40) {
+            return res.status(400).json({
+                error: 'Too many messages. Maximum 40 messages allowed.',
+                provider: 'openai'
+            });
+        }
+
+        for (const message of messages) {
+            if (
+                !message ||
+                typeof message.content !== 'string' ||
+                !['system', 'developer', 'user', 'assistant'].includes(message.role)
+            ) {
+                return res.status(400).json({
+                    error: 'Invalid message format.',
+                    provider: 'openai'
+                });
+            }
+
+            if (message.content.length > 30000) {
+                return res.status(400).json({
+                    error: 'A message is too large.',
+                    provider: 'openai'
+                });
+            }
+        }
+
+        console.log(`[OpenAI] Sending request using ${OPENAI_MODEL}`);
+
+        const response = await axios.post(
+            'https://api.openai.com/v1/chat/completions',
+            {
+                model: OPENAI_MODEL,
+                messages,
+                max_completion_tokens: 8192
+            },
+            {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${OPENAI_API_KEY}`
+                },
+                timeout: 120000
+            }
+        );
+
+        const answer = response.data?.choices?.[0]?.message?.content;
+
+        if (!answer) {
+            console.error('[OpenAI] Empty response:', response.data);
+
+            return res.status(502).json({
+                error: 'OpenAI returned an empty response.',
+                provider: 'openai'
+            });
+        }
+
+        console.log('[OpenAI] Request successful.');
+
+        return res.json({
+            ...response.data,
+            provider: 'openai'
+        });
+
+    } catch (error) {
+        const apiError =
+            error.response?.data?.error?.message ||
+            error.response?.data?.message ||
+            error.message ||
+            'OpenAI request failed.';
+
+        console.error(
+            '[OpenAI AI ERROR]:',
+            error.response?.data || error.message
+        );
+
+        return res.status(error.response?.status || 500).json({
+            error: apiError,
+            provider: 'openai'
+        });
+    }
+});
+
+// ===== OpenAI AI Chat Endpoint END =====
+
 
 // ===== Gemini AI Chat Endpoint START =====
 // Gemini Interactions API with automatic retry and Groq fallback.
