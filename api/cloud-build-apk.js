@@ -1,3 +1,4 @@
+
 const { applyAdMobIntegration } = require('../lib/admob-injector');
 const axios = require('axios');
 const crypto = require('crypto');
@@ -30,8 +31,47 @@ function flattenFiles(input, prefix = '', output = {}) {
     return output;
 }
 
+// Gallery se aane wali Base64 image ko prepare karta hai.
+function prepareAppIcon(iconValue) {
+    if (!iconValue) return null;
+
+    if (typeof iconValue !== 'string') {
+        throw new Error('App icon must be a Base64 image string.');
+    }
+
+    let base64 = iconValue.trim();
+    let extension = 'png';
+
+    const dataUrlMatch = base64.match(
+        /^data:image\/(png|jpeg|jpg|webp);base64,([\s\S]+)$/i
+    );
+
+    if (dataUrlMatch) {
+        const mime = dataUrlMatch[1].toLowerCase();
+        base64 = dataUrlMatch[2].replace(/\s/g, '');
+
+        extension = mime === 'jpeg' ? 'jpg' : mime;
+    } else {
+        base64 = base64.replace(/\s/g, '');
+    }
+
+    if (!base64 || !/^[A-Za-z0-9+/]*={0,2}$/.test(base64)) {
+        throw new Error('Invalid app icon Base64 data.');
+    }
+
+    const buffer = Buffer.from(base64, 'base64');
+
+    if (!buffer.length) {
+        throw new Error('App icon image is empty.');
+    }
+
+    return {
+        base64: buffer.toString('base64'),
+        extension
+    };
+}
+
 module.exports = async (req, res) => {
-    // CORS
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -96,21 +136,30 @@ module.exports = async (req, res) => {
             adMob || { enabled: false }
         );
 
+        // Gallery icon prepare karo.
+        const selectedIcon = iconBase64 || appIcon || null;
+        const preparedIcon = prepareAppIcon(selectedIcon);
+
         // Unique build ID aur temporary branch.
         const buildId = crypto.randomUUID();
         buildBranch = `build-${buildId}`;
         const buildFolder = `.build-input/${buildId}`;
+
+        // Icon ka exact path workflow ko dena hai.
+        const iconPath = preparedIcon
+            ? `app-icon.${preparedIcon.extension}`
+            : null;
 
         // Build configuration.
         const buildConfig = {
             buildId,
             appName,
             packageName,
-            appIcon: appIcon || iconBase64 || null,
+            iconPath,
             adMob: adMobResult.resolved || { enabled: false }
         };
 
-        // GitHub par main branch ka latest commit lo.
+        // Main branch ka latest commit lo.
         const mainRef = await axios.get(
             `${GITHUB_API}/git/ref/heads/${DEFAULT_BRANCH}`,
             { headers: githubHeaders }
@@ -125,7 +174,7 @@ module.exports = async (req, res) => {
 
         const baseTreeSha = parentCommit.data.tree.sha;
 
-        // Build configuration ko GitHub blob mein upload karo.
+        // Build configuration upload karo.
         const configBlob = await axios.post(
             `${GITHUB_API}/git/blobs`,
             {
@@ -144,7 +193,8 @@ module.exports = async (req, res) => {
             }
         ];
 
-        // Project ki tamam files GitHub blobs mein upload karo.
+        // Project files upload karo.
+        // IMPORTANT: Workflow project/ folder expect karta hai.
         const fileEntries = Object.entries(projectFiles);
 
         const uploadedFiles = await Promise.all(
@@ -159,7 +209,7 @@ module.exports = async (req, res) => {
                 );
 
                 return {
-                    path: `${buildFolder}/files/${filePath}`,
+                    path: `${buildFolder}/project/${filePath}`,
                     mode: '100644',
                     type: 'blob',
                     sha: blob.data.sha
@@ -168,6 +218,29 @@ module.exports = async (req, res) => {
         );
 
         treeItems.push(...uploadedFiles);
+
+        // Gallery icon ko separate binary GitHub blob mein upload karo.
+        if (preparedIcon) {
+            const iconBlob = await axios.post(
+                `${GITHUB_API}/git/blobs`,
+                {
+                    content: preparedIcon.base64,
+                    encoding: 'base64'
+                },
+                { headers: githubHeaders }
+            );
+
+            treeItems.push({
+                path: `${buildFolder}/${iconPath}`,
+                mode: '100644',
+                type: 'blob',
+                sha: iconBlob.data.sha
+            });
+
+            console.log('Custom app icon uploaded:', iconPath);
+        } else {
+            console.log('No custom app icon selected.');
+        }
 
         // GitHub tree create karo.
         const newTree = await axios.post(
@@ -218,6 +291,8 @@ module.exports = async (req, res) => {
             buildId,
             message: 'APK build request submitted successfully.',
             artifactsUrl: `https://github.com/${GITHUB_REPO}/actions`,
+            customIcon: !!preparedIcon,
+            iconPath,
             adMob: {
                 enabled: !!adMobResult.applied,
                 reason: adMobResult.reason
