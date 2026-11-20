@@ -410,4 +410,148 @@ app.post('/api/ai-chat', async (req, res) => {
     }
 });
 
+// ===== Gemini AI Chat Endpoint START =====
+// Separate endpoint. Existing Groq endpoint remains unchanged.
+app.post('/api/gemini-chat', async (req, res) => {
+    try {
+        const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+        const GEMINI_MODEL =
+            process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+
+        if (!GEMINI_API_KEY) {
+            return res.status(500).json({
+                error: 'GEMINI_API_KEY is not configured on server.'
+            });
+        }
+
+        const { messages } = req.body || {};
+
+        if (!Array.isArray(messages) || messages.length === 0) {
+            return res.status(400).json({
+                error: 'Messages are required.'
+            });
+        }
+
+        if (messages.length > 40) {
+            return res.status(400).json({
+                error: 'Too many messages. Maximum 40 messages allowed.'
+            });
+        }
+
+        const systemMessages = [];
+        const contents = [];
+
+        for (const message of messages) {
+            if (
+                !message ||
+                typeof message.content !== 'string' ||
+                !['system', 'developer', 'user', 'assistant'].includes(message.role)
+            ) {
+                return res.status(400).json({
+                    error: 'Invalid message format.'
+                });
+            }
+
+            if (message.content.length > 30000) {
+                return res.status(400).json({
+                    error: 'A message is too large.'
+                });
+            }
+
+            if (
+                message.role === 'system' ||
+                message.role === 'developer'
+            ) {
+                systemMessages.push(message.content);
+                continue;
+            }
+
+            contents.push({
+                role: message.role === 'assistant' ? 'model' : 'user',
+                parts: [{ text: message.content }]
+            });
+        }
+
+        if (contents.length === 0) {
+            return res.status(400).json({
+                error: 'At least one user or assistant message is required.'
+            });
+        }
+
+        const requestBody = {
+            contents,
+            generationConfig: {
+                temperature: 0.4,
+                maxOutputTokens: 8192
+            }
+        };
+
+        if (systemMessages.length > 0) {
+            requestBody.systemInstruction = {
+                parts: [{ text: systemMessages.join('\n\n') }]
+            };
+        }
+
+        const response = await axios.post(
+            `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
+            requestBody,
+            {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-goog-api-key': GEMINI_API_KEY
+                },
+                timeout: 120000
+            }
+        );
+
+        const candidate = response.data.candidates?.[0];
+        const answer = candidate?.content?.parts
+            ?.map(part => part.text || '')
+            .join('') || '';
+
+        if (!answer) {
+            return res.status(502).json({
+                error: 'Gemini returned an empty response.'
+            });
+        }
+
+        // OpenAI-compatible response format for frontend compatibility.
+        return res.json({
+            id: response.data.responseId || 'gemini-response',
+            object: 'chat.completion',
+            model: GEMINI_MODEL,
+            choices: [{
+                index: 0,
+                message: {
+                    role: 'assistant',
+                    content: answer
+                },
+                finish_reason: candidate.finishReason || 'stop'
+            }],
+            usage: {
+                prompt_tokens:
+                    response.data.usageMetadata?.promptTokenCount || 0,
+                completion_tokens:
+                    response.data.usageMetadata?.candidatesTokenCount || 0,
+                total_tokens:
+                    response.data.usageMetadata?.totalTokenCount || 0
+            }
+        });
+
+    } catch (error) {
+        console.error(
+            'GEMINI AI ERROR:',
+            error.response?.data || error.message
+        );
+
+        return res.status(error.response?.status || 500).json({
+            error:
+                error.response?.data?.error?.message ||
+                error.message ||
+                'Gemini AI request failed.'
+        });
+    }
+});
+// ===== Gemini AI Chat Endpoint END =====
+
 module.exports = app;
