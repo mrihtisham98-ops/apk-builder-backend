@@ -411,12 +411,13 @@ app.post('/api/ai-chat', async (req, res) => {
 });
 
 // ===== Gemini AI Chat Endpoint START =====
-// Separate endpoint. Existing Groq endpoint remains unchanged.
+// Uses Gemini Interactions API. Existing Groq endpoint remains unchanged.
 app.post('/api/gemini-chat', async (req, res) => {
     try {
         const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-        const GEMINI_MODEL =
-            process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+        const GEMINI_MODEL = (
+            process.env.GEMINI_MODEL || 'gemini-3.8-flash'
+        ).trim().replace(/^models\//, '');
 
         if (!GEMINI_API_KEY) {
             return res.status(500).json({
@@ -439,7 +440,7 @@ app.post('/api/gemini-chat', async (req, res) => {
         }
 
         const systemMessages = [];
-        const contents = [];
+        const input = [];
 
         for (const message of messages) {
             if (
@@ -466,34 +467,33 @@ app.post('/api/gemini-chat', async (req, res) => {
                 continue;
             }
 
-            contents.push({
-                role: message.role === 'assistant' ? 'model' : 'user',
-                parts: [{ text: message.content }]
+            input.push({
+                type: message.role === 'assistant' ? 'model_output' : 'user_input',
+                content: [{
+                    type: 'text',
+                    text: message.content
+                }]
             });
         }
 
-        if (contents.length === 0) {
+        if (input.length === 0) {
             return res.status(400).json({
                 error: 'At least one user or assistant message is required.'
             });
         }
 
         const requestBody = {
-            contents,
-            generationConfig: {
-                temperature: 0.4,
-                maxOutputTokens: 8192
-            }
+            model: GEMINI_MODEL,
+            input,
+            store: false
         };
 
         if (systemMessages.length > 0) {
-            requestBody.systemInstruction = {
-                parts: [{ text: systemMessages.join('\n\n') }]
-            };
+            requestBody.system_instruction = systemMessages.join('\n\n');
         }
 
         const response = await axios.post(
-            `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
+            'https://generativelanguage.googleapis.com/v1beta/interactions',
             requestBody,
             {
                 headers: {
@@ -504,12 +504,26 @@ app.post('/api/gemini-chat', async (req, res) => {
             }
         );
 
-        const candidate = response.data.candidates?.[0];
-        const answer = candidate?.content?.parts
-            ?.map(part => part.text || '')
-            .join('') || '';
+        // Extract text from the Interactions API response.
+        const responseSteps = Array.isArray(response.data.steps)
+            ? response.data.steps
+            : [];
+
+        const answerFromSteps = responseSteps
+            .filter(step => step.type === 'model_output')
+            .flatMap(step => Array.isArray(step.content) ? step.content : [])
+            .filter(part => part.type === 'text' && typeof part.text === 'string')
+            .map(part => part.text)
+            .join('');
+
+        const answer =
+            (typeof response.data.output_text === 'string'
+                ? response.data.output_text
+                : '') || answerFromSteps;
 
         if (!answer) {
+            console.error('GEMINI EMPTY RESPONSE:', response.data);
+
             return res.status(502).json({
                 error: 'Gemini returned an empty response.'
             });
@@ -517,28 +531,27 @@ app.post('/api/gemini-chat', async (req, res) => {
 
         // OpenAI-compatible response format for frontend compatibility.
         return res.json({
-            id: response.data.responseId || 'gemini-response',
+            id: response.data.id || 'gemini-response',
             object: 'chat.completion',
-            model: GEMINI_MODEL,
+            model: response.data.model || GEMINI_MODEL,
             choices: [{
                 index: 0,
                 message: {
                     role: 'assistant',
                     content: answer
                 },
-                finish_reason: candidate.finishReason || 'stop'
+                finish_reason: 'stop'
             }],
             usage: {
-                prompt_tokens:
-                    response.data.usageMetadata?.promptTokenCount || 0,
-                completion_tokens:
-                    response.data.usageMetadata?.candidatesTokenCount || 0,
-                total_tokens:
-                    response.data.usageMetadata?.totalTokenCount || 0
+                prompt_tokens: response.data.usage?.total_input_tokens || 0,
+                completion_tokens: response.data.usage?.total_output_tokens || 0,
+                total_tokens: response.data.usage?.total_tokens || 0
             }
         });
 
     } catch (error) {
+        const apiError = error.response?.data?.error;
+
         console.error(
             'GEMINI AI ERROR:',
             error.response?.data || error.message
@@ -546,7 +559,8 @@ app.post('/api/gemini-chat', async (req, res) => {
 
         return res.status(error.response?.status || 500).json({
             error:
-                error.response?.data?.error?.message ||
+                apiError?.message ||
+                error.response?.data?.message ||
                 error.message ||
                 'Gemini AI request failed.'
         });
