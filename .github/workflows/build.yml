@@ -1,3 +1,4 @@
+
 name: Build Real APK
 
 run-name: Build APK ${{ github.event.client_payload.buildId }}
@@ -44,6 +45,7 @@ jobs:
           import re
           import xml.etree.ElementTree as ET
           from pathlib import Path
+          from PIL import Image, ImageOps
 
           build_id = os.environ["BUILD_ID"]
           source = Path("source/.build-input") / build_id
@@ -140,11 +142,245 @@ jobs:
 
           manifest_path = root / "app/src/main/AndroidManifest.xml"
           manifest_path.parent.mkdir(parents=True, exist_ok=True)
+
+          # =====================================================
+          # CUSTOM APP ICON FIX
+          # Locate the uploaded image and create Android icons.
+          # =====================================================
+
+          print("========== APP ICON DETECTION ==========")
+          print("Configured iconPath:", repr(icon_path))
+
+          supported_extensions = {
+              ".png", ".jpg", ".jpeg", ".webp"
+          }
+
+          icon_file = None
+
+          # 1. First try the exact iconPath from build-config.json.
+          if icon_path and isinstance(icon_path, str):
+              configured_file = (source / icon_path).resolve()
+              source_resolved = source.resolve()
+
+              try:
+                  configured_file.relative_to(source_resolved)
+              except ValueError:
+                  raise SystemExit(
+                      "ERROR: Icon path is outside build directory."
+                  )
+
+              if configured_file.is_file():
+                  icon_file = configured_file
+                  print("Icon found using iconPath:", icon_file)
+
+              else:
+                  print("Configured iconPath file not found.")
+
+          # 2. Search common icon filenames if iconPath is missing.
+          if icon_file is None:
+              preferred_names = [
+                  "app-icon.png",
+                  "app-icon.jpg",
+                  "app-icon.jpeg",
+                  "app-icon.webp",
+                  "app_icon.png",
+                  "app_icon.jpg",
+                  "icon.png",
+                  "icon.jpg",
+                  "icon.jpeg",
+                  "icon.webp",
+                  "launcher.png",
+                  "launcher.jpg",
+                  "launcher.webp"
+              ]
+
+              for filename in preferred_names:
+                  candidate = source / filename
+
+                  if candidate.is_file():
+                      icon_file = candidate
+                      print("Icon found using filename:", candidate)
+                      break
+
+          # 3. Search uploaded image files outside the project folder.
+          if icon_file is None:
+              image_candidates = []
+
+              for candidate in source.rglob("*"):
+                  if not candidate.is_file():
+                      continue
+
+                  if "project" in candidate.relative_to(source).parts:
+                      continue
+
+                  if candidate.name == "build-config.json":
+                      continue
+
+                  if candidate.suffix.lower() in supported_extensions:
+                      image_candidates.append(candidate)
+
+              named_candidates = [
+                  item for item in image_candidates
+                  if "icon" in item.stem.lower()
+                  or "launcher" in item.stem.lower()
+                  or "logo" in item.stem.lower()
+              ]
+
+              if len(named_candidates) == 1:
+                  icon_file = named_candidates[0]
+
+              elif len(image_candidates) == 1:
+                  icon_file = image_candidates[0]
+
+              elif len(named_candidates) > 1:
+                  raise SystemExit(
+                      "ERROR: Multiple possible icon images found. "
+                      "Please provide a clear iconPath in build-config.json."
+                  )
+
+              elif len(image_candidates) > 1:
+                  raise SystemExit(
+                      "ERROR: Multiple images found and no clear app icon "
+                      "could be identified."
+                  )
+
+          icon_enabled = False
+
+          if icon_file is not None:
+              print("SELECTED ICON:", icon_file)
+              print("ICON EXISTS:", icon_file.is_file())
+
+              try:
+                  with Image.open(icon_file) as original:
+                      original.load()
+                      image = ImageOps.exif_transpose(original).convert("RGBA")
+
+                  if image.width < 1 or image.height < 1:
+                      raise ValueError("Invalid image dimensions.")
+
+                  print(
+                      "Original icon dimensions:",
+                      image.width,
+                      "x",
+                      image.height
+                  )
+
+                  # Make a square transparent launcher image.
+                  # This preserves the complete uploaded image.
+                  for folder, size in [
+                      ("mipmap-mdpi", 48),
+                      ("mipmap-hdpi", 72),
+                      ("mipmap-xhdpi", 96),
+                      ("mipmap-xxhdpi", 144),
+                      ("mipmap-xxxhdpi", 192)
+                  ]:
+                      target = root / "app/src/main/res" / folder
+                      target.mkdir(parents=True, exist_ok=True)
+
+                      resized = ImageOps.contain(
+                          image,
+                          (size, size),
+                          method=Image.Resampling.LANCZOS
+                      )
+
+                      canvas = Image.new(
+                          "RGBA",
+                          (size, size),
+                          (0, 0, 0, 0)
+                      )
+
+                      x = (size - resized.width) // 2
+                      y = (size - resized.height) // 2
+
+                      canvas.alpha_composite(resized, (x, y))
+
+                      output_file = target / "ic_launcher.png"
+                      canvas.save(output_file, format="PNG")
+
+                      print(
+                          "CREATED ICON:",
+                          output_file,
+                          output_file.stat().st_size,
+                          "bytes"
+                      )
+
+                  # Set both standard and round launcher icons.
+                  application.set(
+                      f"{{{android_ns}}}icon",
+                      "@mipmap/ic_launcher"
+                  )
+
+                  application.set(
+                      f"{{{android_ns}}}roundIcon",
+                      "@mipmap/ic_launcher"
+                  )
+
+                  icon_enabled = True
+
+                  print("CUSTOM ICON GENERATED SUCCESSFULLY.")
+
+              except Exception as error:
+                  raise SystemExit(
+                      "ERROR: Could not process uploaded app icon: "
+                      + str(error)
+                  )
+
+          else:
+              if icon_path:
+                  raise SystemExit(
+                      "ERROR: iconPath was provided but no valid icon "
+                      "image was found."
+                  )
+
+              print(
+                  "WARNING: No custom icon was uploaded. "
+                  "Android default icon will be used."
+              )
+
+          # Write the final manifest after setting icon attributes.
           ET.ElementTree(manifest).write(
               manifest_path,
               encoding="utf-8",
               xml_declaration=True
           )
+
+          # Verify generated launcher icons.
+          if icon_enabled:
+              for folder in [
+                  "mipmap-mdpi",
+                  "mipmap-hdpi",
+                  "mipmap-xhdpi",
+                  "mipmap-xxhdpi",
+                  "mipmap-xxxhdpi"
+              ]:
+                  generated = (
+                      root / "app/src/main/res" / folder / "ic_launcher.png"
+                  )
+
+                  if not generated.is_file() or generated.stat().st_size == 0:
+                      raise SystemExit(
+                          "ERROR: Launcher icon missing: " + str(generated)
+                      )
+
+              check_tree = ET.parse(manifest_path)
+              check_application = check_tree.getroot().find("application")
+
+              if check_application is None:
+                  raise SystemExit("ERROR: Application element missing.")
+
+              if check_application.get(
+                  f"{{{android_ns}}}icon"
+              ) != "@mipmap/ic_launcher":
+                  raise SystemExit("ERROR: android:icon was not configured.")
+
+              if check_application.get(
+                  f"{{{android_ns}}}roundIcon"
+              ) != "@mipmap/ic_launcher":
+                  raise SystemExit(
+                      "ERROR: android:roundIcon was not configured."
+                  )
+
+              print("LAUNCHER ICON VERIFICATION PASSED.")
 
           # Create MainActivity with Android WebView file picker support.
           java_code = f'''package {package_name};
@@ -253,49 +489,10 @@ jobs:
               encoding="utf-8"
           )
 
-          # Create launcher icons if an icon was uploaded.
-          if icon_path:
-              icon_file = source / icon_path
-
-              if not icon_file.is_file():
-                  raise SystemExit("ERROR: Uploaded app icon not found.")
-
-              from PIL import Image
-
-              image = Image.open(icon_file).convert("RGBA")
-              image.load()
-
-              for folder, size in [
-                  ("mipmap-mdpi", 48),
-                  ("mipmap-hdpi", 72),
-                  ("mipmap-xhdpi", 96),
-                  ("mipmap-xxhdpi", 144),
-                  ("mipmap-xxxhdpi", 192)
-              ]:
-                  target = root / "app/src/main/res" / folder
-                  target.mkdir(parents=True, exist_ok=True)
-
-                  resized = image.resize(
-                      (size, size),
-                      Image.Resampling.LANCZOS
-                  )
-
-                  resized.save(target / "ic_launcher.png")
-
-              application.set(
-                  f"{{{android_ns}}}icon",
-                  "@mipmap/ic_launcher"
-              )
-
-              ET.ElementTree(manifest).write(
-                  manifest_path,
-                  encoding="utf-8",
-                  xml_declaration=True
-              )
-
           print("Project files copied successfully.")
           print("App:", app_name)
           print("Package:", package_name)
+          print("Custom icon enabled:", icon_enabled)
           PY
 
       - name: Create Gradle Project
@@ -500,7 +697,6 @@ jobs:
           android_ns = "http://schemas.android.com/apk/res/android"
           manifest_path = Path("myapp/app/src/main/AndroidManifest.xml")
 
-          # ✅ YEH NAYI LINE ADD KAR DI GAYI HAI:
           ET.register_namespace("android", android_ns)
 
           tree = ET.parse(manifest_path)
@@ -999,6 +1195,76 @@ jobs:
             myapp/app/src/main/AndroidManifest.xml
 
           echo "AdMob integration verification passed."
+
+      # ============================================================
+      # Verify launcher icons AFTER AdMob manifest modification.
+      # ============================================================
+      - name: Verify Final Android Launcher Icons
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          android_ns = "http://schemas.android.com/apk/res/android"
+          manifest_path = Path("myapp/app/src/main/AndroidManifest.xml")
+
+          if not manifest_path.is_file():
+              raise SystemExit("ERROR: AndroidManifest.xml not found.")
+
+          tree = ET.parse(manifest_path)
+          application = tree.getroot().find("application")
+
+          if application is None:
+              raise SystemExit("ERROR: Application element not found.")
+
+          icon = application.get(f"{{{android_ns}}}icon")
+          round_icon = application.get(f"{{{android_ns}}}roundIcon")
+
+          print("Manifest icon:", icon)
+          print("Manifest roundIcon:", round_icon)
+
+          if icon == "@mipmap/ic_launcher":
+              if round_icon != "@mipmap/ic_launcher":
+                  raise SystemExit("ERROR: roundIcon is not configured.")
+
+              folders = [
+                  "mipmap-mdpi",
+                  "mipmap-hdpi",
+                  "mipmap-xhdpi",
+                  "mipmap-xxhdpi",
+                  "mipmap-xxxhdpi"
+              ]
+
+              for folder in folders:
+                  icon_file = (
+                      Path("myapp/app/src/main/res")
+                      / folder
+                      / "ic_launcher.png"
+                  )
+
+                  if not icon_file.is_file():
+                      raise SystemExit(
+                          "ERROR: Missing launcher icon: " + str(icon_file)
+                      )
+
+                  if icon_file.stat().st_size == 0:
+                      raise SystemExit(
+                          "ERROR: Empty launcher icon: " + str(icon_file)
+                      )
+
+                  print("VERIFIED:", icon_file)
+
+              print("CUSTOM LAUNCHER ICON VERIFICATION PASSED.")
+
+          else:
+              print(
+                  "No custom icon configured. "
+                  "This build will use the Android default icon."
+              )
+          PY
 
       # ============================================================
       # AndroidX (ADDED) — Jetifier + AndroidX support
