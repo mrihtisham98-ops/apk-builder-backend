@@ -853,14 +853,20 @@ app.post('/api/gemini-chat', async (req, res) => {
 });
 
 // ============================================================
-// WEB APP STUDIO - AI CODING AGENT
+// WEB APP STUDIO - OPTIMIZED AI CODING AGENT
 // ============================================================
 
-const AGENT_MAX_STEPS = 5;
+const AGENT_MAX_STEPS = 8;
 const AGENT_MAX_FILES = 100;
 const AGENT_MAX_FILE_SIZE = 1024 * 1024;
 const AGENT_MAX_TOTAL_SIZE = 5 * 1024 * 1024;
 const AGENT_MAX_ACTIONS = 30;
+
+// Maximum content returned by one read operation.
+const AGENT_READ_MAX_CHARS = 20000;
+
+// Maximum search matches returned in one operation.
+const AGENT_SEARCH_MAX_MATCHES = 40;
 
 // Validate paths to prevent directory traversal.
 function agentSafePath(filePath) {
@@ -888,7 +894,7 @@ function agentSafePath(filePath) {
     return normalized;
 }
 
-// Prepare a nested project object for the agent.
+// Prepare submitted project files.
 function agentPrepareFiles(files) {
     const flattened = flattenFiles(files);
     const result = {};
@@ -920,7 +926,7 @@ function agentPrepareFiles(files) {
     return result;
 }
 
-// Convert a flat project map back into a nested object.
+// Convert flat files into nested object.
 function agentNestedFiles(flatFiles) {
     const nested = {};
 
@@ -949,7 +955,19 @@ function agentNestedFiles(flatFiles) {
     return nested;
 }
 
-// Parse the JSON returned by the AI.
+// Create a small manifest without sending file contents.
+function agentCreateManifest(files) {
+    return Object.entries(files).map(([path, content]) => ({
+        path,
+        size: Buffer.byteLength(content, 'utf8'),
+        lines: content.split('\n').length,
+        extension: path.includes('.')
+            ? path.split('.').pop().toLowerCase()
+            : ''
+    }));
+}
+
+// Parse JSON returned by AI.
 function agentParseJSON(text) {
     if (typeof text !== 'string') {
         throw new Error('AI returned an invalid response.');
@@ -978,7 +996,10 @@ function agentParseJSON(text) {
     }
 }
 
-// Call the selected AI provider for agent work.
+// ============================================================
+// AI PROVIDER REQUESTS
+// ============================================================
+
 async function agentCallProvider(provider, messages) {
     if (provider === 'openai') {
         const key = process.env.OPENAI_API_KEY;
@@ -1015,8 +1036,7 @@ async function agentCallProvider(provider, messages) {
 
         return {
             text: answer,
-            provider: 'openai',
-            fallback: false
+            provider: 'openai'
         };
     }
 
@@ -1052,8 +1072,7 @@ async function agentCallProvider(provider, messages) {
 
         return {
             text: answer,
-            provider: 'groq',
-            fallback: false
+            provider: 'groq'
         };
     }
 
@@ -1137,15 +1156,86 @@ async function agentCallProvider(provider, messages) {
 
         return {
             text: answer,
-            provider: 'gemini',
-            fallback: false
+            provider: 'gemini'
         };
     }
 
     throw new Error('Unsupported AI provider.');
 }
 
-// Execute AI file actions in a virtual project.
+// Try selected provider first, then the other configured providers.
+async function agentCallWithFallback(preferredProvider, messages) {
+    const order = [
+        preferredProvider,
+        ...['openai', 'gemini', 'groq'].filter(
+            provider => provider !== preferredProvider
+        )
+    ];
+
+    const errors = [];
+
+    for (const provider of order) {
+        try {
+            console.log(`[AI Agent] Trying provider: ${provider}`);
+
+            const result = await agentCallProvider(
+                provider,
+                messages
+            );
+
+            const fallback = provider !== preferredProvider;
+
+            if (fallback) {
+                console.log(
+                    `[AI Agent] Fallback successful using ${provider}`
+                );
+            }
+
+            return {
+                ...result,
+                fallback
+            };
+
+        } catch (error) {
+            const status = error.response?.status;
+
+            const message =
+                error.response?.data?.error?.message ||
+                error.response?.data?.message ||
+                error.message ||
+                'Provider request failed.';
+
+            console.error(
+                `[AI Agent] ${provider} failed:`,
+                message
+            );
+
+            errors.push({
+                provider,
+                status: status || null,
+                message
+            });
+        }
+    }
+
+    const combined = errors
+        .map(item => `${item.provider}: ${item.message}`)
+        .join(' | ');
+
+    const error = new Error(
+        'All AI providers failed. ' + combined
+    );
+
+    error.providerErrors = errors;
+    error.status = 503;
+
+    throw error;
+}
+
+// ============================================================
+// AI FILE ACTIONS
+// ============================================================
+
 function agentExecuteActions(files, actions) {
     const results = [];
     const changedFiles = [];
@@ -1166,6 +1256,10 @@ function agentExecuteActions(files, actions) {
             throw new Error('Invalid agent action.');
         }
 
+        // ----------------------------------------------------
+        // LIST FILES
+        // ----------------------------------------------------
+
         if (action.type === 'list_files') {
             results.push({
                 type: action.type,
@@ -1175,18 +1269,82 @@ function agentExecuteActions(files, actions) {
             continue;
         }
 
+        // ----------------------------------------------------
+        // READ FILE - SUPPORTS LINE RANGES
+        // ----------------------------------------------------
+
         if (action.type === 'read_file') {
             const path = agentSafePath(action.path);
+
+            if (!Object.prototype.hasOwnProperty.call(files, path)) {
+                results.push({
+                    type: action.type,
+                    path,
+                    exists: false,
+                    content: null
+                });
+
+                continue;
+            }
+
+            const content = files[path];
+            const lines = content.split('\n');
+
+            let startLine = Number.isInteger(action.startLine)
+                ? action.startLine
+                : 1;
+
+            let endLine = Number.isInteger(action.endLine)
+                ? action.endLine
+                : Math.min(lines.length, startLine + 119);
+
+            startLine = Math.max(1, Math.min(startLine, lines.length));
+            endLine = Math.max(startLine, Math.min(endLine, lines.length));
+
+            const selectedLines = lines.slice(
+                startLine - 1,
+                endLine
+            );
+
+            let selectedContent = selectedLines
+                .map((line, index) =>
+                    `${startLine + index}: ${line}`
+                )
+                .join('\n');
+
+            const maxChars = Math.min(
+                Math.max(
+                    Number(action.maxChars) || 12000,
+                    1000
+                ),
+                AGENT_READ_MAX_CHARS
+            );
+
+            let truncated = false;
+
+            if (selectedContent.length > maxChars) {
+                selectedContent = selectedContent.slice(0, maxChars);
+                truncated = true;
+            }
 
             results.push({
                 type: action.type,
                 path,
-                content: files[path] ?? null,
-                exists: Object.prototype.hasOwnProperty.call(files, path)
+                exists: true,
+                totalLines: lines.length,
+                startLine,
+                endLine,
+                returnedLines: selectedLines.length,
+                truncated,
+                content: selectedContent
             });
 
             continue;
         }
+
+        // ----------------------------------------------------
+        // SEARCH FILES WITH CONTEXT
+        // ----------------------------------------------------
 
         if (action.type === 'search_files') {
             const query = String(action.query || '');
@@ -1195,33 +1353,143 @@ function agentExecuteActions(files, actions) {
                 throw new Error('Invalid search query.');
             }
 
+            const contextLines = Math.min(
+                Math.max(Number(action.contextLines) || 3, 0),
+                10
+            );
+
             const matches = [];
 
             for (const [path, content] of Object.entries(files)) {
                 const lines = content.split('\n');
 
-                lines.forEach((line, index) => {
+                for (let index = 0; index < lines.length; index++) {
                     if (
-                        line.toLowerCase().includes(query.toLowerCase())
+                        lines[index]
+                            .toLowerCase()
+                            .includes(query.toLowerCase())
                     ) {
+                        const from = Math.max(
+                            0,
+                            index - contextLines
+                        );
+
+                        const to = Math.min(
+                            lines.length,
+                            index + contextLines + 1
+                        );
+
                         matches.push({
                             path,
                             line: index + 1,
-                            content: line.slice(0, 500)
+                            content: lines[index].slice(0, 500),
+                            context: lines
+                                .slice(from, to)
+                                .map((line, offset) => ({
+                                    line: from + offset + 1,
+                                    content: line.slice(0, 500)
+                                }))
                         });
-                    }
-                });
 
-                if (matches.length >= 100) break;
+                        if (matches.length >= AGENT_SEARCH_MAX_MATCHES) {
+                            break;
+                        }
+                    }
+                }
+
+                if (matches.length >= AGENT_SEARCH_MAX_MATCHES) {
+                    break;
+                }
             }
 
             results.push({
                 type: action.type,
-                matches
+                query,
+                matches,
+                limited: matches.length >= AGENT_SEARCH_MAX_MATCHES
             });
 
             continue;
         }
+
+        // ----------------------------------------------------
+        // REPLACE EXACT CODE IN FILE
+        // ----------------------------------------------------
+
+        if (action.type === 'replace_in_file') {
+            const path = agentSafePath(action.path);
+
+            if (!Object.prototype.hasOwnProperty.call(files, path)) {
+                throw new Error(`Cannot replace code. File not found: ${path}`);
+            }
+
+            if (
+                typeof action.find !== 'string' ||
+                !action.find.length ||
+                typeof action.replace !== 'string'
+            ) {
+                throw new Error(
+                    'replace_in_file requires exact find and replace strings.'
+                );
+            }
+
+            const original = files[path];
+            const firstIndex = original.indexOf(action.find);
+
+            if (firstIndex === -1) {
+                results.push({
+                    type: action.type,
+                    path,
+                    success: false,
+                    message: 'Exact code to replace was not found. Read the file again.'
+                });
+
+                continue;
+            }
+
+            const replaceAll = action.replaceAll === true;
+
+            if (replaceAll) {
+                files[path] = original.split(action.find).join(action.replace);
+            } else {
+                const secondIndex = original.indexOf(
+                    action.find,
+                    firstIndex + action.find.length
+                );
+
+                if (secondIndex !== -1) {
+                    results.push({
+                        type: action.type,
+                        path,
+                        success: false,
+                        message:
+                            'The target code occurs more than once. Use a larger unique code section.'
+                    });
+
+                    continue;
+                }
+
+                files[path] =
+                    original.slice(0, firstIndex) +
+                    action.replace +
+                    original.slice(firstIndex + action.find.length);
+            }
+
+            changedFiles.push(path);
+
+            results.push({
+                type: action.type,
+                path,
+                success: true,
+                message: 'Code replaced successfully.'
+            });
+
+            continue;
+        }
+
+        // ----------------------------------------------------
+        // WRITE OR CREATE FILE
+        // ----------------------------------------------------
 
         if (action.type === 'write_file') {
             const path = agentSafePath(action.path);
@@ -1248,6 +1516,10 @@ function agentExecuteActions(files, actions) {
 
             continue;
         }
+
+        // ----------------------------------------------------
+        // DELETE FILE
+        // ----------------------------------------------------
 
         if (action.type === 'delete_file') {
             const path = agentSafePath(action.path);
@@ -1279,6 +1551,7 @@ function agentExecuteActions(files, actions) {
         throw new Error('Unsupported agent action: ' + action.type);
     }
 
+    // Check total project limits after modifications.
     let totalSize = 0;
 
     for (const content of Object.values(files)) {
@@ -1341,6 +1614,7 @@ app.post('/api/ai-agent', async (req, res) => {
             });
         }
 
+        // Keep project in memory, but do not send all file contents to AI.
         const virtualFiles = agentPrepareFiles(submittedFiles);
 
         if (!Object.keys(virtualFiles).length) {
@@ -1350,55 +1624,115 @@ app.post('/api/ai-agent', async (req, res) => {
             });
         }
 
+        const manifest = agentCreateManifest(virtualFiles);
+
+        console.log(
+            `[AI Agent] Project received: ${manifest.length} files.`
+        );
+
+        console.log(
+            '[AI Agent] Sending file manifest first, not complete source code.'
+        );
+
         const systemPrompt = `
 You are the Web App Studio autonomous coding agent.
 
-Your job is to understand and modify the user's submitted project.
+You work like a careful IDE coding assistant.
 
-You can inspect files and make changes using the actions below.
+The user's complete project is available in a virtual project.
+You do NOT receive all file contents automatically.
+
+You must first inspect the file manifest and then request only
+the code sections that are necessary for the user's task.
 
 You MUST return ONLY valid JSON. Do not use Markdown fences.
 
-JSON format:
+Required JSON format:
+
 {
   "message": "Short explanation of your progress",
   "actions": [],
   "done": false
 }
 
-Available actions:
+AVAILABLE ACTIONS:
 
-1. Read a file:
-{"type":"read_file","path":"index.html"}
+1. List project files:
 
-2. List files:
 {"type":"list_files"}
 
-3. Search project:
+2. Read a file or a specific line range:
+
+{"type":"read_file","path":"index.html"}
+
+{"type":"read_file","path":"index.html","startLine":100,"endLine":180}
+
+{"type":"read_file","path":"index.html","startLine":100,"endLine":180,"maxChars":12000}
+
+3. Search project code:
+
 {"type":"search_files","query":"function renderApp"}
 
-4. Create or completely update a file:
-{"type":"write_file","path":"index.html","content":"FULL FILE CONTENT"}
+{"type":"search_files","query":"addEventListener","contextLines":5}
 
-5. Delete a file:
+4. Replace an exact unique code section:
+
+{
+  "type":"replace_in_file",
+  "path":"index.html",
+  "find":"EXACT OLD CODE",
+  "replace":"NEW CODE"
+}
+
+5. Replace every occurrence when explicitly necessary:
+
+{
+  "type":"replace_in_file",
+  "path":"index.html",
+  "find":"OLD CODE",
+  "replace":"NEW CODE",
+  "replaceAll":true
+}
+
+6. Create a new file or completely rewrite a file:
+
+{
+  "type":"write_file",
+  "path":"script.js",
+  "content":"FULL FILE CONTENT"
+}
+
+7. Delete a file:
+
 {"type":"delete_file","path":"old-file.js"}
 
-Rules:
+IMPORTANT WORKFLOW:
 
-- Work only with the submitted project files.
-- Never access server files or run operating-system commands.
-- Preserve existing features and code wherever possible.
-- Do not delete unrelated code.
-- When modifying a file, return its complete updated content.
-- You may edit multiple files in one step.
-- Read or search files when you need more information.
-- Do not delete files unless the user explicitly requests deletion.
+- First inspect the manifest.
+- Identify which files are relevant to the user's task.
+- Use search_files to locate functions, HTML elements, CSS selectors or code.
+- Use read_file with startLine and endLine to inspect only relevant sections.
+- Do not read a 2000-line HTML file completely unless absolutely necessary.
+- Prefer replace_in_file for small and targeted modifications.
+- Use write_file only when creating a new file or when a complete file rewrite is genuinely necessary.
+- If a replacement is not found, search and read the code again.
+- Do not guess existing code.
+- Do not invent function names, IDs or selectors.
+- Do not overwrite unrelated code.
+- Do not delete existing features.
+- Preserve the existing UI, design, functionality and code wherever possible.
+- Never delete files unless the user explicitly requests it.
+- You may inspect and modify multiple files.
+- If you need more context, request it through another action.
+- If the task is unclear, ask the user a question in message and set done=true.
 - Never claim code was tested unless it was actually tested.
-- Do not make unrelated design changes.
-- If the task is unclear, ask a question in message and set done=true.
-- When all requested changes are prepared, set done=true.
-- If another step is needed, set done=false.
-- Keep actions focused on the user's task.
+- When the task is complete, set done=true.
+- When another inspection or edit is needed, set done=false.
+- Keep your actions focused on the user's exact task.
+- Do not return the complete project source in your message.
+- The backend will preserve and return the complete project snapshot.
+
+The project file manifest follows in the first user message.
 `;
 
         let conversation = [
@@ -1410,7 +1744,8 @@ Rules:
                 role: 'user',
                 content:
                     `USER TASK:\n${task}\n\n` +
-                    `PROJECT FILES:\n${JSON.stringify(virtualFiles)}`
+                    `PROJECT FILE MANIFEST:\n${JSON.stringify(manifest)}\n\n` +
+                    'Inspect the manifest and request only the necessary code using the available actions. Do not assume file contents.'
             }
         ];
 
@@ -1424,34 +1759,15 @@ Rules:
         const actionHistory = [];
 
         for (let step = 0; step < AGENT_MAX_STEPS; step++) {
-            let modelResult;
+            console.log(
+                `[AI Agent] Starting step ${step + 1}/${AGENT_MAX_STEPS}`
+            );
 
-            try {
-                modelResult = await agentCallProvider(
-                    actualProvider,
-                    conversation
-                );
-            } catch (providerError) {
-                if (
-                    actualProvider === 'gemini' &&
-                    process.env.GROQ_API_KEY
-                ) {
-                    console.error(
-                        '[AI Agent] Gemini failed; trying Groq:',
-                        providerError.message
-                    );
-
-                    actualProvider = 'groq';
-                    usedFallback = true;
-
-                    modelResult = await agentCallProvider(
-                        'groq',
-                        conversation
-                    );
-                } else {
-                    throw providerError;
-                }
-            }
+            // Automatically try other providers if selected one fails.
+            const modelResult = await agentCallWithFallback(
+                actualProvider,
+                conversation
+            );
 
             actualProvider = modelResult.provider;
             usedFallback = usedFallback || modelResult.fallback;
@@ -1477,14 +1793,21 @@ Rules:
 
             actionHistory.push({
                 step: step + 1,
+                provider: actualProvider,
                 actions: execution.results
             });
+
+            console.log(
+                `[AI Agent] Step ${step + 1} completed. Actions: ${execution.results.length}`
+            );
 
             if (instruction.done === true) {
                 completed = true;
                 break;
             }
 
+            // Send only action results to the next model request.
+            // Do NOT resend the entire project.
             conversation.push({
                 role: 'assistant',
                 content: modelResult.text
@@ -1493,11 +1816,11 @@ Rules:
             conversation.push({
                 role: 'user',
                 content:
-                    'Execute the next step. Previous action results:\n' +
+                    'Here are the results of your previous actions:\n' +
                     JSON.stringify(execution.results) +
-                    '\n\nCurrent project files:\n' +
-                    JSON.stringify(virtualFiles) +
-                    '\n\nReturn the required JSON only.'
+                    '\n\nContinue the task. Request additional code sections only when necessary. ' +
+                    'Do not assume that you have read files that were not returned. ' +
+                    'Return the required JSON only.'
             });
         }
 
@@ -1506,6 +1829,7 @@ Rules:
                 '\nAgent reached its maximum step limit. Some tasks may remain incomplete.';
         }
 
+        // Return complete updated project snapshot to frontend.
         return res.json({
             success: true,
             completed,
@@ -1518,8 +1842,8 @@ Rules:
             steps: actionHistory.length,
             history: actionHistory,
             note:
-                'Changes are prepared in the returned project snapshot. ' +
-                'The frontend must apply these files to the editor.'
+                'AI received only the project manifest and requested code sections. ' +
+                'The frontend must apply the returned project snapshot to the editor.'
         });
 
     } catch (error) {
@@ -1528,13 +1852,14 @@ Rules:
             error.response?.data || error.message
         );
 
-        return res.status(error.response?.status || 500).json({
+        return res.status(error.status || error.response?.status || 500).json({
             success: false,
             error:
                 error.response?.data?.error?.message ||
                 error.response?.data?.message ||
                 error.message ||
-                'AI Agent request failed.'
+                'AI Agent request failed.',
+            providerErrors: error.providerErrors || undefined
         });
     }
 });
