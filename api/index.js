@@ -359,6 +359,7 @@ app.get('/api/build-status/:buildId', async (req, res) => {
 
 // ============================================================
 // GROQ CHAT ENDPOINT
+// Existing server-key endpoint preserved.
 // ============================================================
 
 app.post('/api/ai-chat', async (req, res) => {
@@ -423,6 +424,7 @@ app.post('/api/ai-chat', async (req, res) => {
 
 // ============================================================
 // OPENAI CHAT ENDPOINT
+// Existing server-key endpoint preserved.
 // ============================================================
 
 app.post('/api/openai-chat', async (req, res) => {
@@ -534,6 +536,7 @@ app.post('/api/openai-chat', async (req, res) => {
 
 // ============================================================
 // GEMINI CHAT ENDPOINT WITH GROQ FALLBACK
+// Existing server-key endpoint preserved.
 // ============================================================
 
 app.post('/api/gemini-chat', async (req, res) => {
@@ -853,20 +856,15 @@ app.post('/api/gemini-chat', async (req, res) => {
 });
 
 // ============================================================
-// WEB APP STUDIO - OPTIMIZED AI CODING AGENT
+// WEB APP STUDIO - AI CODING AGENT
+// BYOK: USER SUPPLIES THEIR OWN API KEY
 // ============================================================
 
-const AGENT_MAX_STEPS = 8;
+const AGENT_MAX_STEPS = 5;
 const AGENT_MAX_FILES = 100;
 const AGENT_MAX_FILE_SIZE = 1024 * 1024;
 const AGENT_MAX_TOTAL_SIZE = 5 * 1024 * 1024;
 const AGENT_MAX_ACTIONS = 30;
-
-// Maximum content returned by one read operation.
-const AGENT_READ_MAX_CHARS = 20000;
-
-// Maximum search matches returned in one operation.
-const AGENT_SEARCH_MAX_MATCHES = 40;
 
 // Validate paths to prevent directory traversal.
 function agentSafePath(filePath) {
@@ -894,7 +892,7 @@ function agentSafePath(filePath) {
     return normalized;
 }
 
-// Prepare submitted project files.
+// Prepare a nested project object for the agent.
 function agentPrepareFiles(files) {
     const flattened = flattenFiles(files);
     const result = {};
@@ -926,7 +924,7 @@ function agentPrepareFiles(files) {
     return result;
 }
 
-// Convert flat files into nested object.
+// Convert a flat project map back into a nested object.
 function agentNestedFiles(flatFiles) {
     const nested = {};
 
@@ -955,19 +953,7 @@ function agentNestedFiles(flatFiles) {
     return nested;
 }
 
-// Create a small manifest without sending file contents.
-function agentCreateManifest(files) {
-    return Object.entries(files).map(([path, content]) => ({
-        path,
-        size: Buffer.byteLength(content, 'utf8'),
-        lines: content.split('\n').length,
-        extension: path.includes('.')
-            ? path.split('.').pop().toLowerCase()
-            : ''
-    }));
-}
-
-// Parse JSON returned by AI.
+// Parse the JSON returned by the AI.
 function agentParseJSON(text) {
     if (typeof text !== 'string') {
         throw new Error('AI returned an invalid response.');
@@ -997,19 +983,48 @@ function agentParseJSON(text) {
 }
 
 // ============================================================
-// AI PROVIDER REQUESTS
+// USER API KEY VALIDATION
+// The key is used only for this request.
+// It is not saved in environment variables or a database.
 // ============================================================
 
-async function agentCallProvider(provider, messages) {
+function agentValidateApiKey(apiKey) {
+    if (typeof apiKey !== 'string') {
+        throw new Error('Please enter your own AI API key.');
+    }
+
+    const key = apiKey.trim();
+
+    if (!key) {
+        throw new Error('Please enter your own AI API key.');
+    }
+
+    if (key.length < 10 || key.length > 512) {
+        throw new Error('Invalid API key length.');
+    }
+
+    if (/[\r\n]/.test(key)) {
+        throw new Error('Invalid API key format.');
+    }
+
+    return key;
+}
+
+// ============================================================
+// CALL SELECTED PROVIDER USING THE USER'S OWN API KEY
+// No server API key fallback is allowed in BYOK mode.
+// ============================================================
+
+async function agentCallProvider(provider, messages, userApiKey, customModel) {
+    if (!userApiKey) {
+        throw new Error('Your API key is missing. Please connect your API key.');
+    }
+
     if (provider === 'openai') {
-        const key = process.env.OPENAI_API_KEY;
-
-        if (!key) {
-            throw new Error('OPENAI_API_KEY is not configured.');
-        }
-
         const model = (
-            process.env.OPENAI_MODEL || 'gpt-6-luna'
+            customModel ||
+            process.env.OPENAI_MODEL ||
+            'gpt-6-luna'
         ).trim();
 
         const response = await axios.post(
@@ -1022,7 +1037,7 @@ async function agentCallProvider(provider, messages) {
             {
                 headers: {
                     'Content-Type': 'application/json',
-                    Authorization: `Bearer ${key}`
+                    Authorization: `Bearer ${userApiKey}`
                 },
                 timeout: 120000
             }
@@ -1036,21 +1051,21 @@ async function agentCallProvider(provider, messages) {
 
         return {
             text: answer,
-            provider: 'openai'
+            provider: 'openai',
+            model: response.data.model || model,
+            fallback: false
         };
     }
 
     if (provider === 'groq') {
-        const key = process.env.GROQ_API_KEY;
-
-        if (!key) {
-            throw new Error('GROQ_API_KEY is not configured.');
-        }
+        const model = (
+            customModel || 'openai/gpt-oss-120b'
+        ).trim();
 
         const response = await axios.post(
             'https://api.groq.com/openai/v1/chat/completions',
             {
-                model: 'openai/gpt-oss-120b',
+                model,
                 messages,
                 temperature: 0.2,
                 max_tokens: 8192
@@ -1058,7 +1073,7 @@ async function agentCallProvider(provider, messages) {
             {
                 headers: {
                     'Content-Type': 'application/json',
-                    Authorization: `Bearer ${key}`
+                    Authorization: `Bearer ${userApiKey}`
                 },
                 timeout: 120000
             }
@@ -1072,19 +1087,17 @@ async function agentCallProvider(provider, messages) {
 
         return {
             text: answer,
-            provider: 'groq'
+            provider: 'groq',
+            model: response.data.model || model,
+            fallback: false
         };
     }
 
     if (provider === 'gemini') {
-        const key = process.env.GEMINI_API_KEY;
-
-        if (!key) {
-            throw new Error('GEMINI_API_KEY is not configured.');
-        }
-
         const model = (
-            process.env.GEMINI_MODEL || 'gemini-3.8-flash'
+            customModel ||
+            process.env.GEMINI_MODEL ||
+            'gemini-3.8-flash'
         ).trim().replace(/^models\//, '');
 
         const systemMessages = [];
@@ -1109,6 +1122,12 @@ async function agentCallProvider(provider, messages) {
             }
         }
 
+        if (input.length === 0) {
+            throw new Error(
+                'At least one user or assistant message is required.'
+            );
+        }
+
         const requestBody = {
             model,
             input,
@@ -1126,7 +1145,7 @@ async function agentCallProvider(provider, messages) {
             {
                 headers: {
                     'Content-Type': 'application/json',
-                    'x-goog-api-key': key
+                    'x-goog-api-key': userApiKey
                 },
                 timeout: 120000
             }
@@ -1156,86 +1175,16 @@ async function agentCallProvider(provider, messages) {
 
         return {
             text: answer,
-            provider: 'gemini'
+            provider: 'gemini',
+            model: data.model || model,
+            fallback: false
         };
     }
 
     throw new Error('Unsupported AI provider.');
 }
 
-// Try selected provider first, then the other configured providers.
-async function agentCallWithFallback(preferredProvider, messages) {
-    const order = [
-        preferredProvider,
-        ...['openai', 'gemini', 'groq'].filter(
-            provider => provider !== preferredProvider
-        )
-    ];
-
-    const errors = [];
-
-    for (const provider of order) {
-        try {
-            console.log(`[AI Agent] Trying provider: ${provider}`);
-
-            const result = await agentCallProvider(
-                provider,
-                messages
-            );
-
-            const fallback = provider !== preferredProvider;
-
-            if (fallback) {
-                console.log(
-                    `[AI Agent] Fallback successful using ${provider}`
-                );
-            }
-
-            return {
-                ...result,
-                fallback
-            };
-
-        } catch (error) {
-            const status = error.response?.status;
-
-            const message =
-                error.response?.data?.error?.message ||
-                error.response?.data?.message ||
-                error.message ||
-                'Provider request failed.';
-
-            console.error(
-                `[AI Agent] ${provider} failed:`,
-                message
-            );
-
-            errors.push({
-                provider,
-                status: status || null,
-                message
-            });
-        }
-    }
-
-    const combined = errors
-        .map(item => `${item.provider}: ${item.message}`)
-        .join(' | ');
-
-    const error = new Error(
-        'All AI providers failed. ' + combined
-    );
-
-    error.providerErrors = errors;
-    error.status = 503;
-
-    throw error;
-}
-
-// ============================================================
-// AI FILE ACTIONS
-// ============================================================
-
+// Execute AI file actions in a virtual project.
 function agentExecuteActions(files, actions) {
     const results = [];
     const changedFiles = [];
@@ -1256,10 +1205,6 @@ function agentExecuteActions(files, actions) {
             throw new Error('Invalid agent action.');
         }
 
-        // ----------------------------------------------------
-        // LIST FILES
-        // ----------------------------------------------------
-
         if (action.type === 'list_files') {
             results.push({
                 type: action.type,
@@ -1269,82 +1214,18 @@ function agentExecuteActions(files, actions) {
             continue;
         }
 
-        // ----------------------------------------------------
-        // READ FILE - SUPPORTS LINE RANGES
-        // ----------------------------------------------------
-
         if (action.type === 'read_file') {
             const path = agentSafePath(action.path);
-
-            if (!Object.prototype.hasOwnProperty.call(files, path)) {
-                results.push({
-                    type: action.type,
-                    path,
-                    exists: false,
-                    content: null
-                });
-
-                continue;
-            }
-
-            const content = files[path];
-            const lines = content.split('\n');
-
-            let startLine = Number.isInteger(action.startLine)
-                ? action.startLine
-                : 1;
-
-            let endLine = Number.isInteger(action.endLine)
-                ? action.endLine
-                : Math.min(lines.length, startLine + 119);
-
-            startLine = Math.max(1, Math.min(startLine, lines.length));
-            endLine = Math.max(startLine, Math.min(endLine, lines.length));
-
-            const selectedLines = lines.slice(
-                startLine - 1,
-                endLine
-            );
-
-            let selectedContent = selectedLines
-                .map((line, index) =>
-                    `${startLine + index}: ${line}`
-                )
-                .join('\n');
-
-            const maxChars = Math.min(
-                Math.max(
-                    Number(action.maxChars) || 12000,
-                    1000
-                ),
-                AGENT_READ_MAX_CHARS
-            );
-
-            let truncated = false;
-
-            if (selectedContent.length > maxChars) {
-                selectedContent = selectedContent.slice(0, maxChars);
-                truncated = true;
-            }
 
             results.push({
                 type: action.type,
                 path,
-                exists: true,
-                totalLines: lines.length,
-                startLine,
-                endLine,
-                returnedLines: selectedLines.length,
-                truncated,
-                content: selectedContent
+                content: files[path] ?? null,
+                exists: Object.prototype.hasOwnProperty.call(files, path)
             });
 
             continue;
         }
-
-        // ----------------------------------------------------
-        // SEARCH FILES WITH CONTEXT
-        // ----------------------------------------------------
 
         if (action.type === 'search_files') {
             const query = String(action.query || '');
@@ -1353,143 +1234,33 @@ function agentExecuteActions(files, actions) {
                 throw new Error('Invalid search query.');
             }
 
-            const contextLines = Math.min(
-                Math.max(Number(action.contextLines) || 3, 0),
-                10
-            );
-
             const matches = [];
 
             for (const [path, content] of Object.entries(files)) {
                 const lines = content.split('\n');
 
-                for (let index = 0; index < lines.length; index++) {
+                lines.forEach((line, index) => {
                     if (
-                        lines[index]
-                            .toLowerCase()
-                            .includes(query.toLowerCase())
+                        line.toLowerCase().includes(query.toLowerCase())
                     ) {
-                        const from = Math.max(
-                            0,
-                            index - contextLines
-                        );
-
-                        const to = Math.min(
-                            lines.length,
-                            index + contextLines + 1
-                        );
-
                         matches.push({
                             path,
                             line: index + 1,
-                            content: lines[index].slice(0, 500),
-                            context: lines
-                                .slice(from, to)
-                                .map((line, offset) => ({
-                                    line: from + offset + 1,
-                                    content: line.slice(0, 500)
-                                }))
+                            content: line.slice(0, 500)
                         });
-
-                        if (matches.length >= AGENT_SEARCH_MAX_MATCHES) {
-                            break;
-                        }
                     }
-                }
-
-                if (matches.length >= AGENT_SEARCH_MAX_MATCHES) {
-                    break;
-                }
-            }
-
-            results.push({
-                type: action.type,
-                query,
-                matches,
-                limited: matches.length >= AGENT_SEARCH_MAX_MATCHES
-            });
-
-            continue;
-        }
-
-        // ----------------------------------------------------
-        // REPLACE EXACT CODE IN FILE
-        // ----------------------------------------------------
-
-        if (action.type === 'replace_in_file') {
-            const path = agentSafePath(action.path);
-
-            if (!Object.prototype.hasOwnProperty.call(files, path)) {
-                throw new Error(`Cannot replace code. File not found: ${path}`);
-            }
-
-            if (
-                typeof action.find !== 'string' ||
-                !action.find.length ||
-                typeof action.replace !== 'string'
-            ) {
-                throw new Error(
-                    'replace_in_file requires exact find and replace strings.'
-                );
-            }
-
-            const original = files[path];
-            const firstIndex = original.indexOf(action.find);
-
-            if (firstIndex === -1) {
-                results.push({
-                    type: action.type,
-                    path,
-                    success: false,
-                    message: 'Exact code to replace was not found. Read the file again.'
                 });
 
-                continue;
+                if (matches.length >= 100) break;
             }
-
-            const replaceAll = action.replaceAll === true;
-
-            if (replaceAll) {
-                files[path] = original.split(action.find).join(action.replace);
-            } else {
-                const secondIndex = original.indexOf(
-                    action.find,
-                    firstIndex + action.find.length
-                );
-
-                if (secondIndex !== -1) {
-                    results.push({
-                        type: action.type,
-                        path,
-                        success: false,
-                        message:
-                            'The target code occurs more than once. Use a larger unique code section.'
-                    });
-
-                    continue;
-                }
-
-                files[path] =
-                    original.slice(0, firstIndex) +
-                    action.replace +
-                    original.slice(firstIndex + action.find.length);
-            }
-
-            changedFiles.push(path);
 
             results.push({
                 type: action.type,
-                path,
-                success: true,
-                message: 'Code replaced successfully.'
+                matches
             });
 
             continue;
         }
-
-        // ----------------------------------------------------
-        // WRITE OR CREATE FILE
-        // ----------------------------------------------------
 
         if (action.type === 'write_file') {
             const path = agentSafePath(action.path);
@@ -1516,10 +1287,6 @@ function agentExecuteActions(files, actions) {
 
             continue;
         }
-
-        // ----------------------------------------------------
-        // DELETE FILE
-        // ----------------------------------------------------
 
         if (action.type === 'delete_file') {
             const path = agentSafePath(action.path);
@@ -1551,7 +1318,6 @@ function agentExecuteActions(files, actions) {
         throw new Error('Unsupported agent action: ' + action.type);
     }
 
-    // Check total project limits after modifications.
     let totalSize = 0;
 
     for (const content of Object.values(files)) {
@@ -1574,13 +1340,15 @@ function agentExecuteActions(files, actions) {
 }
 
 // ============================================================
-// AI AGENT ENDPOINT
+// AI AGENT ENDPOINT - BYOK
 // ============================================================
 
 app.post('/api/ai-agent', async (req, res) => {
     try {
         const {
             provider = 'groq',
+            apiKey,
+            model,
             task,
             files: submittedFiles
         } = req.body || {};
@@ -1589,6 +1357,34 @@ app.post('/api/ai-agent', async (req, res) => {
             return res.status(400).json({
                 success: false,
                 error: 'Invalid AI provider.'
+            });
+        }
+
+        // Require the user's own API key.
+        // Do not silently use the platform's server key.
+        let userApiKey;
+
+        try {
+            userApiKey = agentValidateApiKey(apiKey);
+        } catch (keyError) {
+            return res.status(400).json({
+                success: false,
+                error: keyError.message,
+                code: 'API_KEY_REQUIRED'
+            });
+        }
+
+        if (
+            model !== undefined &&
+            (
+                typeof model !== 'string' ||
+                !model.trim() ||
+                model.length > 150
+            )
+        ) {
+            return res.status(400).json({
+                success: false,
+                error: 'Invalid model name.'
             });
         }
 
@@ -1614,7 +1410,6 @@ app.post('/api/ai-agent', async (req, res) => {
             });
         }
 
-        // Keep project in memory, but do not send all file contents to AI.
         const virtualFiles = agentPrepareFiles(submittedFiles);
 
         if (!Object.keys(virtualFiles).length) {
@@ -1624,115 +1419,55 @@ app.post('/api/ai-agent', async (req, res) => {
             });
         }
 
-        const manifest = agentCreateManifest(virtualFiles);
-
-        console.log(
-            `[AI Agent] Project received: ${manifest.length} files.`
-        );
-
-        console.log(
-            '[AI Agent] Sending file manifest first, not complete source code.'
-        );
-
         const systemPrompt = `
 You are the Web App Studio autonomous coding agent.
 
-You work like a careful IDE coding assistant.
+Your job is to understand and modify the user's submitted project.
 
-The user's complete project is available in a virtual project.
-You do NOT receive all file contents automatically.
-
-You must first inspect the file manifest and then request only
-the code sections that are necessary for the user's task.
+You can inspect files and make changes using the actions below.
 
 You MUST return ONLY valid JSON. Do not use Markdown fences.
 
-Required JSON format:
-
+JSON format:
 {
   "message": "Short explanation of your progress",
   "actions": [],
   "done": false
 }
 
-AVAILABLE ACTIONS:
+Available actions:
 
-1. List project files:
-
-{"type":"list_files"}
-
-2. Read a file or a specific line range:
-
+1. Read a file:
 {"type":"read_file","path":"index.html"}
 
-{"type":"read_file","path":"index.html","startLine":100,"endLine":180}
+2. List files:
+{"type":"list_files"}
 
-{"type":"read_file","path":"index.html","startLine":100,"endLine":180,"maxChars":12000}
-
-3. Search project code:
-
+3. Search project:
 {"type":"search_files","query":"function renderApp"}
 
-{"type":"search_files","query":"addEventListener","contextLines":5}
+4. Create or completely update a file:
+{"type":"write_file","path":"index.html","content":"FULL FILE CONTENT"}
 
-4. Replace an exact unique code section:
-
-{
-  "type":"replace_in_file",
-  "path":"index.html",
-  "find":"EXACT OLD CODE",
-  "replace":"NEW CODE"
-}
-
-5. Replace every occurrence when explicitly necessary:
-
-{
-  "type":"replace_in_file",
-  "path":"index.html",
-  "find":"OLD CODE",
-  "replace":"NEW CODE",
-  "replaceAll":true
-}
-
-6. Create a new file or completely rewrite a file:
-
-{
-  "type":"write_file",
-  "path":"script.js",
-  "content":"FULL FILE CONTENT"
-}
-
-7. Delete a file:
-
+5. Delete a file:
 {"type":"delete_file","path":"old-file.js"}
 
-IMPORTANT WORKFLOW:
+Rules:
 
-- First inspect the manifest.
-- Identify which files are relevant to the user's task.
-- Use search_files to locate functions, HTML elements, CSS selectors or code.
-- Use read_file with startLine and endLine to inspect only relevant sections.
-- Do not read a 2000-line HTML file completely unless absolutely necessary.
-- Prefer replace_in_file for small and targeted modifications.
-- Use write_file only when creating a new file or when a complete file rewrite is genuinely necessary.
-- If a replacement is not found, search and read the code again.
-- Do not guess existing code.
-- Do not invent function names, IDs or selectors.
-- Do not overwrite unrelated code.
-- Do not delete existing features.
-- Preserve the existing UI, design, functionality and code wherever possible.
-- Never delete files unless the user explicitly requests it.
-- You may inspect and modify multiple files.
-- If you need more context, request it through another action.
-- If the task is unclear, ask the user a question in message and set done=true.
+- Work only with the submitted project files.
+- Never access server files or run operating-system commands.
+- Preserve existing features and code wherever possible.
+- Do not delete unrelated code.
+- When modifying a file, return its complete updated content.
+- You may edit multiple files in one step.
+- Read or search files when you need more information.
+- Do not delete files unless the user explicitly requests deletion.
 - Never claim code was tested unless it was actually tested.
-- When the task is complete, set done=true.
-- When another inspection or edit is needed, set done=false.
-- Keep your actions focused on the user's exact task.
-- Do not return the complete project source in your message.
-- The backend will preserve and return the complete project snapshot.
-
-The project file manifest follows in the first user message.
+- Do not make unrelated design changes.
+- If the task is unclear, ask a question in message and set done=true.
+- When all requested changes are prepared, set done=true.
+- If another step is needed, set done=false.
+- Keep actions focused on the user's task.
 `;
 
         let conversation = [
@@ -1744,13 +1479,11 @@ The project file manifest follows in the first user message.
                 role: 'user',
                 content:
                     `USER TASK:\n${task}\n\n` +
-                    `PROJECT FILE MANIFEST:\n${JSON.stringify(manifest)}\n\n` +
-                    'Inspect the manifest and request only the necessary code using the available actions. Do not assume file contents.'
+                    `PROJECT FILES:\n${JSON.stringify(virtualFiles)}`
             }
         ];
 
         let actualProvider = provider;
-        let usedFallback = false;
         let finalMessage = '';
         let completed = false;
 
@@ -1759,18 +1492,16 @@ The project file manifest follows in the first user message.
         const actionHistory = [];
 
         for (let step = 0; step < AGENT_MAX_STEPS; step++) {
-            console.log(
-                `[AI Agent] Starting step ${step + 1}/${AGENT_MAX_STEPS}`
-            );
-
-            // Automatically try other providers if selected one fails.
-            const modelResult = await agentCallWithFallback(
+            // Use only the selected provider and the user's own key.
+            // No automatic server-key fallback is performed.
+            const modelResult = await agentCallProvider(
                 actualProvider,
-                conversation
+                conversation,
+                userApiKey,
+                model
             );
 
             actualProvider = modelResult.provider;
-            usedFallback = usedFallback || modelResult.fallback;
 
             const instruction = agentParseJSON(modelResult.text);
 
@@ -1793,21 +1524,14 @@ The project file manifest follows in the first user message.
 
             actionHistory.push({
                 step: step + 1,
-                provider: actualProvider,
                 actions: execution.results
             });
-
-            console.log(
-                `[AI Agent] Step ${step + 1} completed. Actions: ${execution.results.length}`
-            );
 
             if (instruction.done === true) {
                 completed = true;
                 break;
             }
 
-            // Send only action results to the next model request.
-            // Do NOT resend the entire project.
             conversation.push({
                 role: 'assistant',
                 content: modelResult.text
@@ -1816,11 +1540,11 @@ The project file manifest follows in the first user message.
             conversation.push({
                 role: 'user',
                 content:
-                    'Here are the results of your previous actions:\n' +
+                    'Execute the next step. Previous action results:\n' +
                     JSON.stringify(execution.results) +
-                    '\n\nContinue the task. Request additional code sections only when necessary. ' +
-                    'Do not assume that you have read files that were not returned. ' +
-                    'Return the required JSON only.'
+                    '\n\nCurrent project files:\n' +
+                    JSON.stringify(virtualFiles) +
+                    '\n\nReturn the required JSON only.'
             });
         }
 
@@ -1829,37 +1553,68 @@ The project file manifest follows in the first user message.
                 '\nAgent reached its maximum step limit. Some tasks may remain incomplete.';
         }
 
-        // Return complete updated project snapshot to frontend.
         return res.json({
             success: true,
             completed,
             message: finalMessage,
             provider: actualProvider,
-            fallback: usedFallback,
+            fallback: false,
+            billing: 'user_api_key',
             changedFiles: [...allChangedFiles],
             deletedFiles: [...allDeletedFiles],
             files: agentNestedFiles(virtualFiles),
             steps: actionHistory.length,
             history: actionHistory,
             note:
-                'AI received only the project manifest and requested code sections. ' +
-                'The frontend must apply the returned project snapshot to the editor.'
+                'The AI Agent used the API key supplied with this request. ' +
+                'The key was not saved by this endpoint. ' +
+                'The frontend must apply the returned files to the editor.'
         });
 
     } catch (error) {
-        console.error(
-            '[AI AGENT ERROR]:',
-            error.response?.data || error.message
-        );
+        // Never log request bodies or user API keys.
+        const status = error.response?.status || 500;
 
-        return res.status(error.status || error.response?.status || 500).json({
+        const providerError =
+            error.response?.data?.error?.message ||
+            error.response?.data?.error ||
+            error.response?.data?.message ||
+            error.message ||
+            'AI Agent request failed.';
+
+        console.error('[AI AGENT ERROR]', {
+            status,
+            provider: req.body?.provider || 'unknown',
+            message: String(providerError).slice(0, 1000)
+        });
+
+        let userMessage = providerError;
+
+        if (status === 401 || status === 403) {
+            userMessage =
+                'API key authentication failed. Check your API key and provider account permissions.';
+        } else if (status === 429) {
+            userMessage =
+                'Your provider rate limit or quota has been reached. Check your provider billing and usage limits.';
+        } else if (status === 404) {
+            userMessage =
+                'The selected AI model or API endpoint was not found. Check the model name.';
+        } else if (status === 400) {
+            userMessage =
+                typeof providerError === 'string'
+                    ? providerError
+                    : 'The provider rejected the request. Check the model and request settings.';
+        } else if (status === 503 || status === 502 || status === 504) {
+            userMessage =
+                'The selected AI provider is temporarily unavailable. Please try again later.';
+        }
+
+        return res.status(status).json({
             success: false,
-            error:
-                error.response?.data?.error?.message ||
-                error.response?.data?.message ||
-                error.message ||
-                'AI Agent request failed.',
-            providerErrors: error.providerErrors || undefined
+            error: userMessage,
+            provider: req.body?.provider || 'unknown',
+            fallback: false,
+            billing: 'user_api_key'
         });
     }
 });
