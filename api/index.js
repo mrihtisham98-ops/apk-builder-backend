@@ -23,7 +23,10 @@ const github = axios.create({
     timeout: 30000
 });
 
-// Convert nested project files into individual paths.
+// ============================================================
+// PROJECT FILE HELPERS
+// ============================================================
+
 function flattenFiles(obj, prefix = '', output = []) {
     if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
         throw new Error('Invalid project files.');
@@ -54,7 +57,6 @@ function flattenFiles(obj, prefix = '', output = []) {
     return output;
 }
 
-// GitHub API: create a Git blob.
 async function createBlob(content, encoding = 'utf-8') {
     const response = await github.post(`${API}/git/blobs`, {
         content,
@@ -64,7 +66,10 @@ async function createBlob(content, encoding = 'utf-8') {
     return response.data.sha;
 }
 
-// Start a cloud APK build.
+// ============================================================
+// APK BUILD ENDPOINT
+// ============================================================
+
 app.post('/api/cloud-build-apk', async (req, res) => {
     let branch = null;
 
@@ -104,8 +109,7 @@ app.post('/api/cloud-build-apk', async (req, res) => {
             });
         }
 
-        // ===== AdMob Integration START =====
-
+        // AdMob Integration
         const admobFiles = {};
 
         for (const file of projectFiles) {
@@ -121,8 +125,6 @@ app.post('/api/cloud-build-apk', async (req, res) => {
             content
         }));
 
-        // ===== AdMob Integration END =====
-
         const buildId = crypto.randomUUID();
         branch = `build-${buildId}`;
         const buildFolder = `.build-input/${buildId}`;
@@ -137,7 +139,7 @@ app.post('/api/cloud-build-apk', async (req, res) => {
         const entries = [];
         let totalBytes = 0;
 
-        // Upload project files as GitHub blobs.
+        // Upload project files.
         for (const file of projectFiles) {
             const bytes = Buffer.byteLength(file.content, 'utf8');
             totalBytes += bytes;
@@ -209,7 +211,7 @@ app.post('/api/cloud-build-apk', async (req, res) => {
             sha: configSha
         });
 
-        // Get repository's default branch.
+        // Get repository default branch.
         const repoInfo = await github.get(API);
         const defaultBranch = repoInfo.data.default_branch;
 
@@ -242,7 +244,7 @@ app.post('/api/cloud-build-apk', async (req, res) => {
             sha: commit.data.sha
         });
 
-        // Trigger GitHub Actions with a small payload.
+        // Trigger GitHub Actions.
         await github.post(`${API}/dispatches`, {
             event_type: 'build_apk',
             client_payload: {
@@ -273,7 +275,10 @@ app.post('/api/cloud-build-apk', async (req, res) => {
     }
 });
 
-// Check build status and get the public APK download link.
+// ============================================================
+// APK BUILD STATUS
+// ============================================================
+
 app.get('/api/build-status/:buildId', async (req, res) => {
     try {
         const buildId = req.params.buildId;
@@ -287,7 +292,6 @@ app.get('/api/build-status/:buildId', async (req, res) => {
 
         const tag = `apk-${buildId}`;
 
-        // First check whether the APK release exists.
         try {
             const releaseResponse = await github.get(
                 `${API}/releases/tags/${tag}`
@@ -309,7 +313,6 @@ app.get('/api/build-status/:buildId', async (req, res) => {
             if (error.response?.status !== 404) throw error;
         }
 
-        // Find the GitHub Actions run for this build.
         const runsResponse = await github.get(
             `${API}/actions/runs`,
             { params: { per_page: 100 } }
@@ -354,14 +357,18 @@ app.get('/api/build-status/:buildId', async (req, res) => {
     }
 });
 
-// Secure Groq AI Chat Endpoint
+// ============================================================
+// GROQ CHAT ENDPOINT
+// ============================================================
+
 app.post('/api/ai-chat', async (req, res) => {
     try {
         const GROQ_API_KEY = process.env.GROQ_API_KEY;
 
         if (!GROQ_API_KEY) {
             return res.status(500).json({
-                error: 'GROQ_API_KEY is not configured on server.'
+                error: 'GROQ_API_KEY is not configured on server.',
+                provider: 'groq'
             });
         }
 
@@ -369,7 +376,8 @@ app.post('/api/ai-chat', async (req, res) => {
 
         if (!Array.isArray(messages) || messages.length === 0) {
             return res.status(400).json({
-                error: 'Messages are required.'
+                error: 'Messages are required.',
+                provider: 'groq'
             });
         }
 
@@ -390,7 +398,11 @@ app.post('/api/ai-chat', async (req, res) => {
             }
         );
 
-        return res.json(response.data);
+        return res.json({
+            ...response.data,
+            provider: 'groq',
+            fallback: false
+        });
 
     } catch (error) {
         console.error(
@@ -402,14 +414,16 @@ app.post('/api/ai-chat', async (req, res) => {
             error:
                 error.response?.data?.error?.message ||
                 error.message ||
-                'AI request failed.'
+                'AI request failed.',
+            provider: 'groq',
+            fallback: false
         });
     }
 });
 
-// ===== OpenAI AI Chat Endpoint START =====
-// OpenAI Chat Completions API.
-// Default model can be changed using OPENAI_MODEL in Vercel.
+// ============================================================
+// OPENAI CHAT ENDPOINT
+// ============================================================
 
 app.post('/api/openai-chat', async (req, res) => {
     try {
@@ -494,7 +508,8 @@ app.post('/api/openai-chat', async (req, res) => {
 
         return res.json({
             ...response.data,
-            provider: 'openai'
+            provider: 'openai',
+            fallback: false
         });
 
     } catch (error) {
@@ -511,16 +526,15 @@ app.post('/api/openai-chat', async (req, res) => {
 
         return res.status(error.response?.status || 500).json({
             error: apiError,
-            provider: 'openai'
+            provider: 'openai',
+            fallback: false
         });
     }
 });
 
-// ===== OpenAI AI Chat Endpoint END =====
-
-
-// ===== Gemini AI Chat Endpoint START =====
-// Gemini Interactions API with automatic retry and Groq fallback.
+// ============================================================
+// GEMINI CHAT ENDPOINT WITH GROQ FALLBACK
+// ============================================================
 
 app.post('/api/gemini-chat', async (req, res) => {
     const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -535,7 +549,9 @@ app.post('/api/gemini-chat', async (req, res) => {
 
         if (!GEMINI_API_KEY) {
             return res.status(500).json({
-                error: 'GEMINI_API_KEY is not configured on server.'
+                error: 'GEMINI_API_KEY is not configured on server.',
+                provider: 'gemini',
+                fallback: false
             });
         }
 
@@ -543,13 +559,15 @@ app.post('/api/gemini-chat', async (req, res) => {
 
         if (!Array.isArray(messages) || messages.length === 0) {
             return res.status(400).json({
-                error: 'Messages are required.'
+                error: 'Messages are required.',
+                provider: 'gemini'
             });
         }
 
         if (messages.length > 40) {
             return res.status(400).json({
-                error: 'Too many messages. Maximum 40 messages allowed.'
+                error: 'Too many messages. Maximum 40 messages allowed.',
+                provider: 'gemini'
             });
         }
 
@@ -563,13 +581,15 @@ app.post('/api/gemini-chat', async (req, res) => {
                 !['system', 'developer', 'user', 'assistant'].includes(message.role)
             ) {
                 return res.status(400).json({
-                    error: 'Invalid message format.'
+                    error: 'Invalid message format.',
+                    provider: 'gemini'
                 });
             }
 
             if (message.content.length > 30000) {
                 return res.status(400).json({
-                    error: 'A message is too large.'
+                    error: 'A message is too large.',
+                    provider: 'gemini'
                 });
             }
 
@@ -592,7 +612,8 @@ app.post('/api/gemini-chat', async (req, res) => {
 
         if (input.length === 0) {
             return res.status(400).json({
-                error: 'At least one user or assistant message is required.'
+                error: 'At least one user or assistant message is required.',
+                provider: 'gemini'
             });
         }
 
@@ -606,7 +627,6 @@ app.post('/api/gemini-chat', async (req, res) => {
             requestBody.system_instruction = systemMessages.join('\n\n');
         }
 
-        // Extract text from Gemini response.
         function extractGeminiText(data) {
             const responseSteps = Array.isArray(data.steps)
                 ? data.steps
@@ -631,7 +651,6 @@ app.post('/api/gemini-chat', async (req, res) => {
             );
         }
 
-        // Retry temporary Gemini errors.
         let geminiResponse = null;
         let geminiError = null;
 
@@ -689,7 +708,6 @@ app.post('/api/gemini-chat', async (req, res) => {
             }
         }
 
-        // Gemini succeeded: return its response.
         if (geminiResponse) {
             const answer = extractGeminiText(geminiResponse.data);
 
@@ -700,7 +718,9 @@ app.post('/api/gemini-chat', async (req, res) => {
                 );
 
                 return res.status(502).json({
-                    error: 'Gemini returned an empty response.'
+                    error: 'Gemini returned an empty response.',
+                    provider: 'gemini',
+                    fallback: false
                 });
             }
 
@@ -709,6 +729,7 @@ app.post('/api/gemini-chat', async (req, res) => {
                 object: 'chat.completion',
                 model: geminiResponse.data.model || GEMINI_MODEL,
                 provider: 'gemini',
+                fallback: false,
                 choices: [{
                     index: 0,
                     message: {
@@ -728,7 +749,6 @@ app.post('/api/gemini-chat', async (req, res) => {
             });
         }
 
-        // Gemini failed: use existing Groq model automatically.
         console.error(
             '[Gemini] All retry attempts failed. Trying Groq fallback.'
         );
@@ -809,6 +829,7 @@ app.post('/api/gemini-chat', async (req, res) => {
                     groqError.response?.data?.error?.message ||
                     groqError.message ||
                     'Groq request failed.',
+                provider: 'gemini',
                 fallback: false
             });
         }
@@ -824,11 +845,702 @@ app.post('/api/gemini-chat', async (req, res) => {
                 error.response?.data?.error?.message ||
                 error.response?.data?.message ||
                 error.message ||
-                'Gemini AI request failed.'
+                'Gemini AI request failed.',
+            provider: 'gemini',
+            fallback: false
         });
     }
 });
 
-// ===== Gemini AI Chat Endpoint END =====
+// ============================================================
+// WEB APP STUDIO - AI CODING AGENT
+// ============================================================
+
+const AGENT_MAX_STEPS = 5;
+const AGENT_MAX_FILES = 100;
+const AGENT_MAX_FILE_SIZE = 1024 * 1024;
+const AGENT_MAX_TOTAL_SIZE = 5 * 1024 * 1024;
+const AGENT_MAX_ACTIONS = 30;
+
+// Validate paths to prevent directory traversal.
+function agentSafePath(filePath) {
+    if (typeof filePath !== 'string' || !filePath.trim()) {
+        throw new Error('Invalid file path.');
+    }
+
+    const normalized = filePath
+        .replace(/\\/g, '/')
+        .replace(/^\/+/, '');
+
+    const parts = normalized.split('/');
+
+    if (
+        parts.some(part =>
+            !part ||
+            part === '.' ||
+            part === '..' ||
+            part.includes('\0')
+        )
+    ) {
+        throw new Error('Unsafe file path: ' + filePath);
+    }
+
+    return normalized;
+}
+
+// Prepare a nested project object for the agent.
+function agentPrepareFiles(files) {
+    const flattened = flattenFiles(files);
+    const result = {};
+    let totalSize = 0;
+
+    if (flattened.length > AGENT_MAX_FILES) {
+        throw new Error(
+            `Maximum ${AGENT_MAX_FILES} project files are supported.`
+        );
+    }
+
+    for (const file of flattened) {
+        const safePath = agentSafePath(file.path);
+        const size = Buffer.byteLength(file.content, 'utf8');
+
+        if (size > AGENT_MAX_FILE_SIZE) {
+            throw new Error(`File is too large: ${safePath}`);
+        }
+
+        totalSize += size;
+
+        if (totalSize > AGENT_MAX_TOTAL_SIZE) {
+            throw new Error('AI Agent project limit is 5 MB.');
+        }
+
+        result[safePath] = file.content;
+    }
+
+    return result;
+}
+
+// Convert a flat project map back into a nested object.
+function agentNestedFiles(flatFiles) {
+    const nested = {};
+
+    for (const [filePath, content] of Object.entries(flatFiles)) {
+        const safePath = agentSafePath(filePath);
+        const parts = safePath.split('/');
+        let current = nested;
+
+        for (let index = 0; index < parts.length - 1; index++) {
+            const part = parts[index];
+
+            if (
+                !current[part] ||
+                typeof current[part] !== 'object' ||
+                Array.isArray(current[part])
+            ) {
+                current[part] = {};
+            }
+
+            current = current[part];
+        }
+
+        current[parts[parts.length - 1]] = content;
+    }
+
+    return nested;
+}
+
+// Parse the JSON returned by the AI.
+function agentParseJSON(text) {
+    if (typeof text !== 'string') {
+        throw new Error('AI returned an invalid response.');
+    }
+
+    let cleaned = text.trim();
+
+    cleaned = cleaned
+        .replace(/^```(?:json)?\s*/i, '')
+        .replace(/\s*```$/, '')
+        .trim();
+
+    try {
+        return JSON.parse(cleaned);
+    } catch (_) {
+        const first = cleaned.indexOf('{');
+        const last = cleaned.lastIndexOf('}');
+
+        if (first !== -1 && last > first) {
+            return JSON.parse(cleaned.slice(first, last + 1));
+        }
+
+        throw new Error(
+            'AI did not return valid agent instructions. Please try again.'
+        );
+    }
+}
+
+// Call the selected AI provider for agent work.
+async function agentCallProvider(provider, messages) {
+    if (provider === 'openai') {
+        const key = process.env.OPENAI_API_KEY;
+
+        if (!key) {
+            throw new Error('OPENAI_API_KEY is not configured.');
+        }
+
+        const model = (
+            process.env.OPENAI_MODEL || 'gpt-6-luna'
+        ).trim();
+
+        const response = await axios.post(
+            'https://api.openai.com/v1/chat/completions',
+            {
+                model,
+                messages,
+                max_completion_tokens: 8192
+            },
+            {
+                headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${key}`
+                },
+                timeout: 120000
+            }
+        );
+
+        const answer = response.data?.choices?.[0]?.message?.content;
+
+        if (!answer) {
+            throw new Error('OpenAI returned an empty response.');
+        }
+
+        return {
+            text: answer,
+            provider: 'openai',
+            fallback: false
+        };
+    }
+
+    if (provider === 'groq') {
+        const key = process.env.GROQ_API_KEY;
+
+        if (!key) {
+            throw new Error('GROQ_API_KEY is not configured.');
+        }
+
+        const response = await axios.post(
+            'https://api.groq.com/openai/v1/chat/completions',
+            {
+                model: 'openai/gpt-oss-120b',
+                messages,
+                temperature: 0.2,
+                max_tokens: 8192
+            },
+            {
+                headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${key}`
+                },
+                timeout: 120000
+            }
+        );
+
+        const answer = response.data?.choices?.[0]?.message?.content;
+
+        if (!answer) {
+            throw new Error('Groq returned an empty response.');
+        }
+
+        return {
+            text: answer,
+            provider: 'groq',
+            fallback: false
+        };
+    }
+
+    if (provider === 'gemini') {
+        const key = process.env.GEMINI_API_KEY;
+
+        if (!key) {
+            throw new Error('GEMINI_API_KEY is not configured.');
+        }
+
+        const model = (
+            process.env.GEMINI_MODEL || 'gemini-3.8-flash'
+        ).trim().replace(/^models\//, '');
+
+        const systemMessages = [];
+        const input = [];
+
+        for (const message of messages) {
+            if (
+                message.role === 'system' ||
+                message.role === 'developer'
+            ) {
+                systemMessages.push(message.content);
+            } else {
+                input.push({
+                    type: message.role === 'assistant'
+                        ? 'model_output'
+                        : 'user_input',
+                    content: [{
+                        type: 'text',
+                        text: message.content
+                    }]
+                });
+            }
+        }
+
+        const requestBody = {
+            model,
+            input,
+            store: false
+        };
+
+        if (systemMessages.length) {
+            requestBody.system_instruction =
+                systemMessages.join('\n\n');
+        }
+
+        const response = await axios.post(
+            'https://generativelanguage.googleapis.com/v1beta/interactions',
+            requestBody,
+            {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-goog-api-key': key
+                },
+                timeout: 120000
+            }
+        );
+
+        const data = response.data || {};
+
+        let answer = data.output_text || '';
+
+        if (!answer && Array.isArray(data.steps)) {
+            answer = data.steps
+                .filter(step => step.type === 'model_output')
+                .flatMap(step =>
+                    Array.isArray(step.content) ? step.content : []
+                )
+                .filter(part =>
+                    part.type === 'text' &&
+                    typeof part.text === 'string'
+                )
+                .map(part => part.text)
+                .join('');
+        }
+
+        if (!answer) {
+            throw new Error('Gemini returned an empty response.');
+        }
+
+        return {
+            text: answer,
+            provider: 'gemini',
+            fallback: false
+        };
+    }
+
+    throw new Error('Unsupported AI provider.');
+}
+
+// Execute AI file actions in a virtual project.
+function agentExecuteActions(files, actions) {
+    const results = [];
+    const changedFiles = [];
+    const deletedFiles = [];
+
+    if (!Array.isArray(actions)) {
+        throw new Error('AI returned invalid actions.');
+    }
+
+    if (actions.length > AGENT_MAX_ACTIONS) {
+        throw new Error(
+            `Maximum ${AGENT_MAX_ACTIONS} actions allowed per step.`
+        );
+    }
+
+    for (const action of actions) {
+        if (!action || typeof action.type !== 'string') {
+            throw new Error('Invalid agent action.');
+        }
+
+        if (action.type === 'list_files') {
+            results.push({
+                type: action.type,
+                files: Object.keys(files)
+            });
+
+            continue;
+        }
+
+        if (action.type === 'read_file') {
+            const path = agentSafePath(action.path);
+
+            results.push({
+                type: action.type,
+                path,
+                content: files[path] ?? null,
+                exists: Object.prototype.hasOwnProperty.call(files, path)
+            });
+
+            continue;
+        }
+
+        if (action.type === 'search_files') {
+            const query = String(action.query || '');
+
+            if (!query || query.length > 500) {
+                throw new Error('Invalid search query.');
+            }
+
+            const matches = [];
+
+            for (const [path, content] of Object.entries(files)) {
+                const lines = content.split('\n');
+
+                lines.forEach((line, index) => {
+                    if (
+                        line.toLowerCase().includes(query.toLowerCase())
+                    ) {
+                        matches.push({
+                            path,
+                            line: index + 1,
+                            content: line.slice(0, 500)
+                        });
+                    }
+                });
+
+                if (matches.length >= 100) break;
+            }
+
+            results.push({
+                type: action.type,
+                matches
+            });
+
+            continue;
+        }
+
+        if (action.type === 'write_file') {
+            const path = agentSafePath(action.path);
+
+            if (typeof action.content !== 'string') {
+                throw new Error('File content must be text.');
+            }
+
+            const size = Buffer.byteLength(action.content, 'utf8');
+
+            if (size > AGENT_MAX_FILE_SIZE) {
+                throw new Error(`Edited file is too large: ${path}`);
+            }
+
+            files[path] = action.content;
+
+            changedFiles.push(path);
+
+            results.push({
+                type: action.type,
+                path,
+                success: true
+            });
+
+            continue;
+        }
+
+        if (action.type === 'delete_file') {
+            const path = agentSafePath(action.path);
+
+            if (!Object.prototype.hasOwnProperty.call(files, path)) {
+                results.push({
+                    type: action.type,
+                    path,
+                    success: false,
+                    message: 'File does not exist.'
+                });
+
+                continue;
+            }
+
+            delete files[path];
+
+            deletedFiles.push(path);
+
+            results.push({
+                type: action.type,
+                path,
+                success: true
+            });
+
+            continue;
+        }
+
+        throw new Error('Unsupported agent action: ' + action.type);
+    }
+
+    let totalSize = 0;
+
+    for (const content of Object.values(files)) {
+        totalSize += Buffer.byteLength(content, 'utf8');
+    }
+
+    if (Object.keys(files).length > AGENT_MAX_FILES) {
+        throw new Error('Agent exceeded the maximum project file count.');
+    }
+
+    if (totalSize > AGENT_MAX_TOTAL_SIZE) {
+        throw new Error('Agent exceeded the 5 MB project limit.');
+    }
+
+    return {
+        results,
+        changedFiles: [...new Set(changedFiles)],
+        deletedFiles: [...new Set(deletedFiles)]
+    };
+}
+
+// ============================================================
+// AI AGENT ENDPOINT
+// ============================================================
+
+app.post('/api/ai-agent', async (req, res) => {
+    try {
+        const {
+            provider = 'groq',
+            task,
+            files: submittedFiles
+        } = req.body || {};
+
+        if (!['openai', 'groq', 'gemini'].includes(provider)) {
+            return res.status(400).json({
+                success: false,
+                error: 'Invalid AI provider.'
+            });
+        }
+
+        if (
+            typeof task !== 'string' ||
+            !task.trim() ||
+            task.length > 12000
+        ) {
+            return res.status(400).json({
+                success: false,
+                error: 'Please provide a task. Maximum 12000 characters.'
+            });
+        }
+
+        if (
+            !submittedFiles ||
+            typeof submittedFiles !== 'object' ||
+            Array.isArray(submittedFiles)
+        ) {
+            return res.status(400).json({
+                success: false,
+                error: 'Project files are required.'
+            });
+        }
+
+        const virtualFiles = agentPrepareFiles(submittedFiles);
+
+        if (!Object.keys(virtualFiles).length) {
+            return res.status(400).json({
+                success: false,
+                error: 'The project contains no files.'
+            });
+        }
+
+        const systemPrompt = `
+You are the Web App Studio autonomous coding agent.
+
+Your job is to understand and modify the user's submitted project.
+
+You can inspect files and make changes using the actions below.
+
+You MUST return ONLY valid JSON. Do not use Markdown fences.
+
+JSON format:
+{
+  "message": "Short explanation of your progress",
+  "actions": [],
+  "done": false
+}
+
+Available actions:
+
+1. Read a file:
+{"type":"read_file","path":"index.html"}
+
+2. List files:
+{"type":"list_files"}
+
+3. Search project:
+{"type":"search_files","query":"function renderApp"}
+
+4. Create or completely update a file:
+{"type":"write_file","path":"index.html","content":"FULL FILE CONTENT"}
+
+5. Delete a file:
+{"type":"delete_file","path":"old-file.js"}
+
+Rules:
+
+- Work only with the submitted project files.
+- Never access server files or run operating-system commands.
+- Preserve existing features and code wherever possible.
+- Do not delete unrelated code.
+- When modifying a file, return its complete updated content.
+- You may edit multiple files in one step.
+- Read or search files when you need more information.
+- Do not delete files unless the user explicitly requests deletion.
+- Never claim code was tested unless it was actually tested.
+- Do not make unrelated design changes.
+- If the task is unclear, ask a question in message and set done=true.
+- When all requested changes are prepared, set done=true.
+- If another step is needed, set done=false.
+- Keep actions focused on the user's task.
+`;
+
+        let conversation = [
+            {
+                role: 'system',
+                content: systemPrompt
+            },
+            {
+                role: 'user',
+                content:
+                    `USER TASK:\n${task}\n\n` +
+                    `PROJECT FILES:\n${JSON.stringify(virtualFiles)}`
+            }
+        ];
+
+        let actualProvider = provider;
+        let usedFallback = false;
+        let finalMessage = '';
+        let completed = false;
+
+        const allChangedFiles = new Set();
+        const allDeletedFiles = new Set();
+        const actionHistory = [];
+
+        for (let step = 0; step < AGENT_MAX_STEPS; step++) {
+            let modelResult;
+
+            try {
+                modelResult = await agentCallProvider(
+                    actualProvider,
+                    conversation
+                );
+            } catch (providerError) {
+                if (
+                    actualProvider === 'gemini' &&
+                    process.env.GROQ_API_KEY
+                ) {
+                    console.error(
+                        '[AI Agent] Gemini failed; trying Groq:',
+                        providerError.message
+                    );
+
+                    actualProvider = 'groq';
+                    usedFallback = true;
+
+                    modelResult = await agentCallProvider(
+                        'groq',
+                        conversation
+                    );
+                } else {
+                    throw providerError;
+                }
+            }
+
+            actualProvider = modelResult.provider;
+            usedFallback = usedFallback || modelResult.fallback;
+
+            const instruction = agentParseJSON(modelResult.text);
+
+            finalMessage = String(
+                instruction.message || ''
+            ).slice(0, 5000);
+
+            const execution = agentExecuteActions(
+                virtualFiles,
+                instruction.actions || []
+            );
+
+            execution.changedFiles.forEach(path =>
+                allChangedFiles.add(path)
+            );
+
+            execution.deletedFiles.forEach(path =>
+                allDeletedFiles.add(path)
+            );
+
+            actionHistory.push({
+                step: step + 1,
+                actions: execution.results
+            });
+
+            if (instruction.done === true) {
+                completed = true;
+                break;
+            }
+
+            conversation.push({
+                role: 'assistant',
+                content: modelResult.text
+            });
+
+            conversation.push({
+                role: 'user',
+                content:
+                    'Execute the next step. Previous action results:\n' +
+                    JSON.stringify(execution.results) +
+                    '\n\nCurrent project files:\n' +
+                    JSON.stringify(virtualFiles) +
+                    '\n\nReturn the required JSON only.'
+            });
+        }
+
+        if (!completed) {
+            finalMessage +=
+                '\nAgent reached its maximum step limit. Some tasks may remain incomplete.';
+        }
+
+        return res.json({
+            success: true,
+            completed,
+            message: finalMessage,
+            provider: actualProvider,
+            fallback: usedFallback,
+            changedFiles: [...allChangedFiles],
+            deletedFiles: [...allDeletedFiles],
+            files: agentNestedFiles(virtualFiles),
+            steps: actionHistory.length,
+            history: actionHistory,
+            note:
+                'Changes are prepared in the returned project snapshot. ' +
+                'The frontend must apply these files to the editor.'
+        });
+
+    } catch (error) {
+        console.error(
+            '[AI AGENT ERROR]:',
+            error.response?.data || error.message
+        );
+
+        return res.status(error.response?.status || 500).json({
+            success: false,
+            error:
+                error.response?.data?.error?.message ||
+                error.response?.data?.message ||
+                error.message ||
+                'AI Agent request failed.'
+        });
+    }
+});
+
+// ============================================================
+// END AI CODING AGENT
+// ============================================================
 
 module.exports = app;
