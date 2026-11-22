@@ -140,6 +140,11 @@ function extractBase64Content(content) {
 const r2Client = new S3Client({
     region: 'auto',
     endpoint: `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+    // Cloudflare R2 S3 API works reliably with path-style bucket addressing.
+    forcePathStyle: true,
+    // Avoid SDK-injected checksum requirements on browser-side presigned PUT uploads.
+    requestChecksumCalculation: 'WHEN_REQUIRED',
+    responseChecksumValidation: 'WHEN_REQUIRED',
     credentials: {
         accessKeyId: process.env.R2_ACCESS_KEY_ID,
         secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
@@ -148,8 +153,17 @@ const r2Client = new S3Client({
 
 app.post('/api/r2-upload-url', async (req, res) => {
     try {
-        const { buildId } = req.body;
-        
+        const requiredEnv = ['R2_ACCOUNT_ID', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'R2_BUCKET_NAME'];
+        const missingEnv = requiredEnv.filter((name) => !process.env[name]);
+        if (missingEnv.length) {
+            return res.status(500).json({
+                success: false,
+                error: `Missing R2 environment variables: ${missingEnv.join(', ')}`
+            });
+        }
+
+        const { buildId } = req.body || {};
+
         if (!buildId) {
             return res.status(400).json({ success: false, error: 'buildId is required' });
         }
