@@ -6,11 +6,33 @@ const { applyAdMobIntegration } = require('../lib/admob-injector');
 
 const app = express();
 
-app.use(cors());
+// ============================================================
+// CORS CONFIGURATION
+// - Vercel par deployment protection ke saath preflight 401
+//   ho sakta hai; isliye explicit OPTIONS handling add ki.
+// - Origin ko env var se configure karo taake production
+//   domain hardcode na ho.
+// ============================================================
+const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS
+    ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim())
+    : '*';
+
+app.use(cors({
+    origin: ALLOWED_ORIGINS,
+    methods: ['GET', 'POST', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    credentials: false
+}));
+
+// Explicit OPTIONS preflight handler (Vercel par zaroori)
+app.options('*', (req, res) => {
+    res.status(204).end();
+});
+
 // [CHANGE 1] JSON body limit 50mb -> 100mb
-// Offline dependency bundling ke liye bade projects support.
-// NOTE: Hosting platform ka apna body limit check karein
-// (Vercel = 4.5 MB hard limit, Railway/Render = configurable).
+// NOTE: Vercel par ye kaam NAHI karega jab tak
+// VERCEL_SUPPORT_LARGE_REQUEST_BODY=1 set na ho.
+// 4.5 MB default limit Vercel khud enforce karta hai.
 app.use(express.json({ limit: '100mb' }));
 
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
@@ -23,8 +45,7 @@ const github = axios.create({
         Accept: 'application/vnd.github+json',
         'X-GitHub-Api-Version': '2022-11-28'
     },
-    // [CHANGE 2] 30s -> 60s
-    // Bade projects mein sequential blob uploads 30s se zyada le sakte hain.
+    // [CHANGE 2] 30s -> 60s (bade projects ke liye)
     timeout: 60000
 });
 
@@ -72,20 +93,19 @@ async function createBlob(content, encoding = 'utf-8') {
 }
 
 // ============================================================
-// [CHANGE 3] BINARY FILE DETECTION HELPERS
-// Offline dependency bundling ka actual kaam build.yml mein hota hai.
-// Backend sirf images/fonts/binary assets ko lossless transfer karta hai.
+// [CHANGE 3] BINARY FILE DETECTION
+// Images/fonts ko UTF-8 se encode karne par bytes corrupt
+// ho jate hain. Ye helpers base64 payload ko lossless
+// transfer karte hain.
 // ============================================================
 
 function isBinaryContent(content) {
     if (typeof content !== 'string' || !content) return false;
 
-    // Data URI binary asset (image/font/icon)
     if (/^data:(image|font|application)\/[a-zA-Z0-9.+-]+;base64,/i.test(content)) {
         return true;
     }
 
-    // Pure base64 string without whitespace/newlines
     if (
         content.length > 40 &&
         /^[A-Za-z0-9+/]+={0,2}$/.test(content) &&
@@ -94,7 +114,6 @@ function isBinaryContent(content) {
         return true;
     }
 
-    // NUL byte => definitely binary
     if (content.includes('\u0000')) {
         return true;
     }
@@ -112,14 +131,10 @@ function extractBase64Content(content) {
 
 // ============================================================
 // APK BUILD ENDPOINT
-// ORIGINAL IMPLEMENTATION PRESERVED
-// Changes: 100 MB limits, binary-safe upload, buildId in error
 // ============================================================
 
 app.post('/api/cloud-build-apk', async (req, res) => {
     let branch = null;
-    // [CHANGE 4] buildId ko try ke bahar declare kiya taake
-    // error response mein debug ke liye include ho sake.
     let buildId = null;
 
     try {
@@ -187,7 +202,7 @@ app.post('/api/cloud-build-apk', async (req, res) => {
 
         const entries = [];
         let totalBytes = 0;
-        // [CHANGE 5] 50 MB -> 100 MB
+        // [CHANGE 4] 50 MB -> 100 MB
         const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
 
         // Upload project files.
@@ -196,15 +211,13 @@ app.post('/api/cloud-build-apk', async (req, res) => {
             let byteLength;
 
             if (isBinaryContent(file.content)) {
-                // [CHANGE 6] Binary asset (image, font, base64 payload)
-                // ko decode -> re-encode base64 taake bytes lossless rahen.
-                // Offline bundler build.yml mein hota hai; backend sirf transfer.
+                // Binary asset: decode -> re-encode base64 (lossless)
                 const base64 = extractBase64Content(file.content);
                 const buffer = Buffer.from(base64, 'base64');
                 byteLength = buffer.length;
                 blobContent = buffer.toString('base64');
             } else {
-                // Text asset (HTML, CSS, JS, JSON, SVG, etc.)
+                // Text asset
                 byteLength = Buffer.byteLength(file.content, 'utf8');
                 blobContent = Buffer.from(file.content, 'utf8').toString('base64');
             }
@@ -239,7 +252,6 @@ app.post('/api/cloud-build-apk', async (req, res) => {
 
             const iconBuffer = Buffer.from(match[2], 'base64');
 
-            // [CHANGE 7] Size check pehle, phir totalBytes update
             if (totalBytes + iconBuffer.length > MAX_UPLOAD_BYTES) {
                 throw new Error(
                     'Project and icon exceed the 100 MB upload limit.'
@@ -328,27 +340,48 @@ app.post('/api/cloud-build-apk', async (req, res) => {
         });
 
     } catch (error) {
-        console.error(
-            'APK BUILD ERROR:',
-            error.response?.data || error.message
-        );
+        const githubError = error.response?.data;
 
-        // [CHANGE 8] Debug ke liye buildId include karo (agar ban chuka hai)
+        // Detailed logging taake actual reason pata chale
+        console.error('APK BUILD ERROR:', {
+            message: error.message,
+            status: error.response?.status,
+            githubError: githubError,
+            buildId: buildId || null
+        });
+
+        // [CHANGE 5] Meaningful HTTP status
+        let statusCode = 500;
+        let errorMessage =
+            error.response?.data?.message ||
+            error.message ||
+            'Could not start APK build.';
+
+        if (error.response?.status === 401 || error.response?.status === 403) {
+            statusCode = 502;
+            errorMessage = 'GitHub authentication failed. Check GITHUB_TOKEN permissions.';
+        } else if (error.response?.status === 404) {
+            statusCode = 502;
+            errorMessage = 'GitHub repository not found. Check GITHUB_REPO.';
+        } else if (error.response?.status === 422) {
+            statusCode = 502;
+            errorMessage = 'GitHub rejected the request. The repository may be empty or the token lacks permissions.';
+        } else if (error.message?.includes('too large')) {
+            statusCode = 413;
+        }
+
         const payload = {
             success: false,
-            error:
-                error.response?.data?.message ||
-                error.message ||
-                'Could not start APK build.'
+            error: errorMessage
         };
 
         if (buildId) {
             payload.buildId = buildId;
         }
 
-        return res.status(500).json(payload);
+        return res.status(statusCode).json(payload);
     }
-});
+});  
 // ============================================================
 // APK BUILD STATUS
 // ORIGINAL IMPLEMENTATION PRESERVED - NO CHANGES
