@@ -1,4 +1,3 @@
-
 name: Build Real APK
 
 run-name: Build APK ${{ github.event.client_payload.buildId }}
@@ -28,8 +27,10 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Install Python Image Support
-        run: pip install Pillow
+      - name: Install Python Image and Offline Bundling Support
+        run: |
+          python3 -m pip install --upgrade pip
+          pip install Pillow requests beautifulsoup4 tinycss2
 
       - name: Set up Gradle Cache
         uses: gradle/actions/setup-gradle@v4
@@ -495,11 +496,378 @@ jobs:
           print("Custom icon enabled:", icon_enabled)
           PY
 
-      - name: Create Gradle Project
+      # ============================================================
+      # OFFLINE DEPENDENCY BUNDLER
+      # Downloads common external CSS, JS, fonts and images into APK.
+      # ============================================================
+      - name: Bundle External Dependencies for Offline APK
         run: |
-          mkdir -p myapp/app
+          python3 - <<'PY'
+          import re
+          import json
+          import hashlib
+          import mimetypes
+          from pathlib import Path
+          from urllib.parse import urljoin, urlparse, unquote
+          import requests
+          from bs4 import BeautifulSoup
 
-          cat > myapp/settings.gradle <<'EOF'
+          assets = Path("myapp/app/src/main/assets")
+          offline = assets / "offline-deps"
+          offline.mkdir(parents=True, exist_ok=True)
+
+          session = requests.Session()
+          session.headers.update({
+              "User-Agent": "Mozilla/5.0 OfflineAPKBuilder/1.0"
+          })
+
+          downloaded = {}
+          failures = []
+          total_bytes = 0
+          MAX_FILE_SIZE = 25 * 1024 * 1024
+          TIMEOUT = 25
+
+          def is_remote(value):
+              return value.startswith(("http://", "https://"))
+
+          def clean_url(value):
+              value = value.strip().strip("'\"")
+              if not value or value.startswith((
+                  "data:", "blob:", "javascript:", "mailto:",
+                  "tel:", "#", "file:"
+              )):
+                  return None
+              return value
+
+          def download_url(url, kind="asset"):
+              global total_bytes
+
+              url = clean_url(url)
+              if not url or not is_remote(url):
+                  return None
+
+              if url in downloaded:
+                  return downloaded[url]
+
+              try:
+                  response = session.get(
+                      url,
+                      timeout=TIMEOUT,
+                      stream=True,
+                      allow_redirects=True
+                  )
+                  response.raise_for_status()
+
+                  content_length = response.headers.get("content-length")
+                  if content_length and int(content_length) > MAX_FILE_SIZE:
+                      raise ValueError("File exceeds 25 MB limit")
+
+                  content = bytearray()
+                  for chunk in response.iter_content(64 * 1024):
+                      if not chunk:
+                          continue
+                      content.extend(chunk)
+                      if len(content) > MAX_FILE_SIZE:
+                          raise ValueError("File exceeds 25 MB limit")
+
+                  if not content:
+                      raise ValueError("Downloaded file is empty")
+
+                  final_url = response.url
+                  content_type = response.headers.get(
+                      "content-type", ""
+                  ).split(";")[0].strip().lower()
+
+                  parsed = urlparse(final_url)
+                  suffix = Path(unquote(parsed.path)).suffix.lower()
+
+                  if not suffix or len(suffix) > 8:
+                      guessed = mimetypes.guess_extension(content_type)
+                      suffix = guessed or ".bin"
+
+                  digest = hashlib.sha256(
+                      (final_url + str(len(content))).encode("utf-8")
+                      + bytes(content[:256])
+                  ).hexdigest()[:20]
+
+                  filename = digest + suffix
+                  target = offline / filename
+                  target.write_bytes(content)
+
+                  local_path = "offline-deps/" + filename
+                  downloaded[url] = local_path
+                  downloaded[final_url] = local_path
+                  total_bytes += len(content)
+
+                  print(
+                      "DOWNLOADED:",
+                      kind,
+                      url,
+                      "->",
+                      local_path,
+                      "(",
+                      len(content),
+                      "bytes )"
+                  )
+
+                  return local_path
+
+              except Exception as error:
+                  failures.append({
+                      "url": url,
+                      "type": kind,
+                      "error": str(error)
+                  })
+                  print("DOWNLOAD WARNING:", url, str(error))
+                  return None
+
+          css_url_pattern = re.compile(
+              r"url\(\s*(['\"]?)(.*?)\1\s*\)",
+              re.IGNORECASE
+          )
+
+          import_pattern = re.compile(
+              r"@import\s+(?:url\(\s*)?(['\"])(.*?)\1\s*\)?([^;]*);",
+              re.IGNORECASE
+          )
+
+          def process_css(css_text, base_url, depth=0):
+              if depth > 5:
+                  return css_text
+
+              def replace_import(match):
+                  original_url = match.group(2).strip()
+                  absolute = urljoin(base_url, original_url)
+
+                  local = download_url(absolute, "css-import")
+                  if not local:
+                      return match.group(0)
+
+                  try:
+                      response = session.get(absolute, timeout=TIMEOUT)
+                      response.raise_for_status()
+                      nested_css = process_css(
+                          response.text,
+                          response.url,
+                          depth + 1
+                      )
+                      (assets / local).write_text(
+                          nested_css,
+                          encoding="utf-8"
+                      )
+                  except Exception as error:
+                      failures.append({
+                          "url": absolute,
+                          "type": "css-import-processing",
+                          "error": str(error)
+                      })
+
+                  return '@import url("' + local + '")' + match.group(3) + ';'
+
+              css_text = import_pattern.sub(replace_import, css_text)
+
+              def replace_css_url(match):
+                  original_url = match.group(2).strip()
+                  if not original_url:
+                      return match.group(0)
+
+                  absolute = urljoin(base_url, original_url)
+                  local = download_url(absolute, "css-resource")
+
+                  if local:
+                      return 'url("' + local + '")'
+
+                  return match.group(0)
+
+              css_text = css_url_pattern.sub(replace_css_url, css_text)
+              return css_text
+
+          html_files = list(assets.rglob("*.html"))
+          css_files = list(assets.rglob("*.css"))
+
+          print("HTML files found:", len(html_files))
+          print("CSS files found:", len(css_files))
+
+          # Process existing local CSS files.
+          for css_file in css_files:
+              try:
+                  original_css = css_file.read_text(
+                      encoding="utf-8",
+                      errors="replace"
+                  )
+                  processed_css = process_css(
+                      original_css,
+                      "https://offline.invalid/"
+                  )
+                  css_file.write_text(
+                      processed_css,
+                      encoding="utf-8"
+                  )
+              except Exception as error:
+                  failures.append({
+                      "file": str(css_file),
+                      "type": "local-css",
+                      "error": str(error)
+                  })
+
+          # Process every HTML page in the project.
+          for html_file in html_files:
+              print("PROCESSING HTML:", html_file.relative_to(assets))
+
+              html_text = html_file.read_text(
+                  encoding="utf-8",
+                  errors="replace"
+              )
+
+              soup = BeautifulSoup(html_text, "html.parser")
+
+              # External stylesheet links.
+              for tag in soup.find_all("link", href=True):
+                  rel = tag.get("rel", [])
+                  rel_text = " ".join(rel).lower() if isinstance(
+                      rel, list
+                  ) else str(rel).lower()
+
+                  href = tag.get("href", "").strip()
+
+                  if "stylesheet" in rel_text and is_remote(href):
+                      local = download_url(href, "stylesheet")
+
+                      if local:
+                          try:
+                              response = session.get(
+                                  href,
+                                  timeout=TIMEOUT
+                              )
+                              response.raise_for_status()
+                              css = process_css(
+                                  response.text,
+                                  response.url
+                              )
+                              (assets / local).write_text(
+                                  css,
+                                  encoding="utf-8"
+                              )
+                          except Exception as error:
+                              failures.append({
+                                  "url": href,
+                                  "type": "stylesheet-processing",
+                                  "error": str(error)
+                              })
+
+                          tag["href"] = local
+
+                  elif is_remote(href) and rel_text in (
+                      "icon", "shortcut icon", "apple-touch-icon"
+                  ):
+                      local = download_url(href, "html-icon")
+                      if local:
+                          tag["href"] = local
+
+              # External JavaScript files.
+              for tag in soup.find_all("script", src=True):
+                  src = tag.get("src", "").strip()
+
+                  if is_remote(src):
+                      local = download_url(src, "javascript")
+                      if local:
+                          tag["src"] = local
+
+              # Images, video posters and audio/video sources.
+              for tag in soup.find_all(True):
+                  for attribute in ("src", "poster"):
+                      value = tag.get(attribute)
+
+                      if value and is_remote(str(value).strip()):
+                          local = download_url(
+                              str(value).strip(),
+                              "html-" + attribute
+                          )
+                          if local:
+                              tag[attribute] = local
+
+                  # Inline style attributes.
+                  style = tag.get("style")
+                  if style:
+                      tag["style"] = process_css(
+                          style,
+                          "https://offline.invalid/"
+                      )
+
+              # CSS inside <style> blocks.
+              for style_tag in soup.find_all("style"):
+                  if style_tag.string:
+                      style_tag.string.replace_with(
+                          process_css(
+                              str(style_tag.string),
+                              "https://offline.invalid/"
+                          )
+                      )
+
+              # Rewrite srcset entries when possible.
+              for tag in soup.find_all(srcset=True):
+                  entries = []
+                  for item in tag.get("srcset", "").split(","):
+                      parts = item.strip().split()
+                      if not parts:
+                          continue
+
+                      candidate = parts[0]
+                      if is_remote(candidate):
+                          local = download_url(candidate, "srcset")
+                          if local:
+                              parts[0] = local
+
+                      entries.append(" ".join(parts))
+
+                  tag["srcset"] = ", ".join(entries)
+
+              html_file.write_text(
+                  str(soup),
+                  encoding="utf-8"
+              )
+
+          report = {
+              "status": "completed",
+              "html_files_processed": len(html_files),
+              "css_files_processed": len(css_files),
+              "resources_downloaded": len(downloaded),
+              "downloaded_size_bytes": total_bytes,
+              "downloaded_size_mb": round(
+                  total_bytes / (1024 * 1024), 2
+              ),
+              "failed_resources": failures,
+              "limitations": [
+                  "JavaScript dynamic imports and runtime-created URLs "
+                  "are not automatically rewritten.",
+                  "Remote APIs, databases, authentication, streaming and "
+                  "server features still require internet.",
+                  "Some CDN packages may depend on additional runtime "
+                  "resources that this bundler cannot detect."
+              ]
+          }
+
+          report_file = assets / "offline-bundling-report.json"
+          report_file.write_text(
+              json.dumps(report, indent=2),
+              encoding="utf-8"
+          )
+
+          print("========== OFFLINE BUNDLING SUMMARY ==========")
+          print("Resources downloaded:", len(downloaded))
+          print("Downloaded MB:", report["downloaded_size_mb"])
+          print("Failed resources:", len(failures))
+          print("Report:", report_file)
+          print("==============================================")
+
+          PY
+      - name: Create Gradle Project
+        working-directory: myapp
+        run: |
+          mkdir -p app/src/main/java/${PACKAGE_NAME//./\/}
+          mkdir -p app/src/main/res/values
+
+          cat > settings.gradle <<'EOF'
           pluginManagement {
               repositories {
                   google()
@@ -516,821 +884,86 @@ jobs:
               }
           }
 
-          rootProject.name = 'MyWebApp'
+          rootProject.name = "MyApp"
           include ':app'
           EOF
 
-          cat > myapp/build.gradle <<'EOF'
+          cat > build.gradle <<'EOF'
           plugins {
               id 'com.android.application' version '8.1.0' apply false
           }
           EOF
 
-          cat > myapp/app/build.gradle <<'EOF'
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          android.enableJetifier=true
+          EOF
+
+          cat > app/build.gradle <<'EOF'
           plugins {
               id 'com.android.application'
           }
 
           android {
-              namespace 'com.app.builder'
+              namespace System.getenv("PACKAGE_NAME")
               compileSdk 34
 
               defaultConfig {
-                  applicationId 'com.app.builder'
+                  applicationId System.getenv("PACKAGE_NAME")
                   minSdk 21
                   targetSdk 34
                   versionCode 1
-                  versionName '1.0'
+                  versionName "1.0"
               }
           }
           EOF
 
-          # Replace the default package settings with the user's package.
-          python3 - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-
-          build_id = os.environ["BUILD_ID"]
-          config = json.loads(
-              (Path("source/.build-input") / build_id / "build-config.json")
-              .read_text(encoding="utf-8")
-          )
-
-          gradle_file = Path("myapp/app/build.gradle")
-          content = gradle_file.read_text(encoding="utf-8")
-          content = content.replace(
-              "com.app.builder",
-              config["packageName"]
-          )
-          gradle_file.write_text(content, encoding="utf-8")
-          PY
-        env:
-          BUILD_ID: ${{ github.event.client_payload.buildId }}
-
-      # ============================================================
-      # Google AdMob (Google Mobile Ads SDK) — OLD DISABLED STEPS
-      # Preserved from original workflow.
-      # ============================================================
-      - name: Configure Google Mobile Ads SDK dependency
-        if: false
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          ADMOB_SDK_VERSION="23.2.0"
-          ADMOB_DEP_LINE="implementation 'com.google.android.gms:play-services-ads:${ADMOB_SDK_VERSION}'"
-
-          APP_GRADLE="myapp/app/build.gradle"
-
-          if [ ! -f "$APP_GRADLE" ]; then
-            echo "❌ Expected Gradle file not found: $APP_GRADLE"
-            exit 1
-          fi
-          echo "✅ Found app Gradle file: $APP_GRADLE"
-
-          if grep -q "com.google.android.gms:play-services-ads" "$APP_GRADLE"; then
-            echo "ℹ️ AdMob SDK dependency already present — skipping."
-          else
-            echo "➕ Adding Google Mobile Ads SDK ${ADMOB_SDK_VERSION} to ${APP_GRADLE}"
-            if grep -qE '^[[:space:]]*dependencies[[:space:]]*\{' "$APP_GRADLE"; then
-              awk -v dep="$ADMOB_DEP_LINE" '
-                BEGIN { done=0 }
-                /^[[:space:]]*dependencies[[:space:]]*\{/ && !done {
-                  print
-                  print "    " dep
-                  done=1
-                  next
-                }
-                { print }
-              ' "$APP_GRADLE" > "$APP_GRADLE.tmp" && mv "$APP_GRADLE.tmp" "$APP_GRADLE"
-            else
-              printf '\n\ndependencies {\n    %s\n}\n' "$ADMOB_DEP_LINE" >> "$APP_GRADLE"
-            fi
-          fi
-
-          echo "🔧 Ensuring Google Maven repository..."
-          SETTINGS_GRADLE="myapp/settings.gradle"
-          if grep -qE 'google\(\)|maven\.google\.com' "$SETTINGS_GRADLE"; then
-            echo "ℹ️ Google Maven repo already present."
-          else
-            echo "➕ Adding google() to repositories."
-            awk '
-              BEGIN { done=0 }
-              /repositories[[:space:]]*\{/ && !done {
-                print
-                print "            google()"
-                done=1
-                next
-              }
-              { print }
-            ' "$SETTINGS_GRADLE" > "$SETTINGS_GRADLE.tmp" && mv "$SETTINGS_GRADLE.tmp" "$SETTINGS_GRADLE"
-          fi
-
-          echo "✅ Old AdMob SDK configuration step completed."
-
-      - name: Verify AdMob SDK configuration
-        if: false
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "🔎 Verifying AdMob SDK dependency and Google Maven repo..."
-          FOUND_DEP=$(grep -R "com.google.android.gms:play-services-ads" --include='build.gradle' myapp || true)
-          echo "--- AdMob dependency lines ---"
-          echo "${FOUND_DEP:-<none>}"
-          FOUND_REPO=$(grep -R -E 'google\(\)|maven\.google\.com' --include='settings.gradle' --include='build.gradle' myapp || true)
-          echo "--- Google Maven repo lines ---"
-          echo "${FOUND_REPO:-<none>}"
-          if [ -z "$FOUND_DEP" ]; then
-            echo "❌ AdMob SDK dependency was not added!"
-            exit 1
-          fi
-          if [ -z "$FOUND_REPO" ]; then
-            echo "❌ Google Maven repo not found!"
-            exit 1
-          fi
-          echo "✅ Verification passed."
-
-      # ============================================================
-      # NEW CONDITIONAL ADMOB INTEGRATION
-      # Runs only when admob.config.json exists and enabled is true.
-      # ============================================================
-      - name: Configure AdMob SDK and Android Java Bridge
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          ASSET_CONFIG="myapp/app/src/main/assets/admob.config.json"
-
-          if [ ! -f "$ASSET_CONFIG" ]; then
-            echo "AdMob config not found. Building without AdMob."
-            exit 0
-          fi
-
-          ENABLED=$(python3 -c "import json; print(str(json.load(open('$ASSET_CONFIG')).get('enabled', False)).lower())")
-
-          if [ "$ENABLED" != "true" ]; then
-            echo "AdMob is disabled. Building without AdMob SDK."
-            exit 0
-          fi
-
-          echo "AdMob enabled. Configuring Google Mobile Ads SDK."
-
-          python3 - <<'PY'
-          import json
-          import os
-          import re
-          from pathlib import Path
-          import xml.etree.ElementTree as ET
-
-          config_path = Path("myapp/app/src/main/assets/admob.config.json")
-          config = json.loads(config_path.read_text(encoding="utf-8"))
-
-          app_id = config.get("appId", "").strip()
-
-          if not app_id:
-              raise SystemExit("ERROR: AdMob App ID is missing.")
-
-          if not re.fullmatch(r"ca-app-pub-[0-9]+~[0-9]+", app_id):
-              raise SystemExit("ERROR: Invalid AdMob App ID format.")
-
-          android_ns = "http://schemas.android.com/apk/res/android"
-          manifest_path = Path("myapp/app/src/main/AndroidManifest.xml")
-
-          ET.register_namespace("android", android_ns)
-
-          tree = ET.parse(manifest_path)
-          root = tree.getroot()
-          application = root.find("application")
-
-          if application is None:
-              raise SystemExit("ERROR: Android application element not found.")
-
-          for item in list(application):
-              if item.tag == "meta-data" and item.get(
-                  f"{{{android_ns}}}name"
-              ) == "com.google.android.gms.ads.APPLICATION_ID":
-                  application.remove(item)
-
-          metadata = ET.SubElement(application, "meta-data")
-          metadata.set(
-              f"{{{android_ns}}}name",
-              "com.google.android.gms.ads.APPLICATION_ID"
-          )
-          metadata.set(
-              f"{{{android_ns}}}value",
-              app_id
-          )
-
-          tree.write(
-              manifest_path,
-              encoding="utf-8",
-              xml_declaration=True
-          )
-
-          print("AdMob App ID added to AndroidManifest.xml.")
-
-          package_name = root.get("package")
-          java_dir = Path("myapp/app/src/main/java") / Path(
-              *package_name.split(".")
-          )
-
-          main_activity = java_dir / "MainActivity.java"
-          source = main_activity.read_text(encoding="utf-8")
-
-          bridge_line = (
-              'webView.addJavascriptInterface('
-              'new AdMobBridge(this, webView), "AndroidAds");'
-          )
-
-          if "new AdMobBridge(this, webView)" not in source:
-              source = source.replace(
-                  'webView.loadUrl("file:///android_asset/index.html");',
-                  bridge_line + '\n                  '
-                  'webView.loadUrl("file:///android_asset/index.html");'
-              )
-
-          main_activity.write_text(source, encoding="utf-8")
-
-          bridge_code = r'''
-          package PACKAGE_NAME;
-
-          import android.app.Activity;
-          import android.graphics.Color;
-          import android.view.Gravity;
-          import android.view.View;
-          import android.view.ViewGroup;
-          import android.widget.FrameLayout;
-          import android.widget.TextView;
-          import android.webkit.JavascriptInterface;
-          import android.webkit.WebView;
-
-          import com.google.android.gms.ads.AdRequest;
-          import com.google.android.gms.ads.AdSize;
-          import com.google.android.gms.ads.AdView;
-          import com.google.android.gms.ads.MobileAds;
-          import com.google.android.gms.ads.LoadAdError;
-          import com.google.android.gms.ads.FullScreenContentCallback;
-          import com.google.android.gms.ads.interstitial.InterstitialAd;
-          import com.google.android.gms.ads.interstitial.InterstitialAdLoadCallback;
-          import com.google.android.gms.ads.rewarded.RewardedAd;
-          import com.google.android.gms.ads.rewarded.RewardedAdLoadCallback;
-          import com.google.android.gms.ads.rewarded.RewardItem;
-          import com.google.android.gms.ads.nativead.NativeAd;
-          import com.google.android.gms.ads.nativead.NativeAdView;
-          import com.google.android.gms.ads.nativead.NativeAdOptions;
-          import com.google.android.gms.ads.nativead.NativeAd.OnNativeAdLoadedListener;
-          import com.google.android.gms.ads.AdListener;
-          import com.google.android.gms.ads.AdLoader;
-          import com.google.android.gms.ads.appopen.AppOpenAd;
-          import com.google.android.gms.ads.appopen.AppOpenAd.AppOpenAdLoadCallback;
-
-          import org.json.JSONObject;
-
-          public class AdMobBridge {
-              private final Activity activity;
-              private final WebView webView;
-
-              private String bannerId = "";
-              private String interstitialId = "";
-              private String rewardedId = "";
-              private String nativeId = "";
-              private String appOpenId = "";
-
-              private AdView bannerView;
-              private InterstitialAd interstitialAd;
-              private RewardedAd rewardedAd;
-              private NativeAd nativeAd;
-              private AppOpenAd appOpenAd;
-
-              private boolean initialized = false;
-              private boolean appOpenShown = false;
-
-              public AdMobBridge(Activity activity, WebView webView) {
-                  this.activity = activity;
-                  this.webView = webView;
-              }
-
-              @JavascriptInterface
-              public void configure(String json) {
-                  try {
-                      JSONObject cfg = new JSONObject(json);
-
-                      bannerId = cfg.optString("bannerId", "");
-                      interstitialId = cfg.optString("interstitialId", "");
-                      rewardedId = cfg.optString("rewardedId", "");
-                      nativeId = cfg.optString("nativeId", "");
-                      appOpenId = cfg.optString("appOpenId", "");
-
-                      activity.runOnUiThread(() -> {
-                          if (initialized) return;
-
-                          initialized = true;
-
-                          MobileAds.initialize(activity, status -> {
-                              loadInterstitial();
-                              loadRewarded();
-                              loadNative();
-                              loadAppOpen();
-                          });
-                      });
-
-                  } catch (Exception e) {
-                      android.util.Log.e("AdMobBridge", "Config error", e);
-                  }
-              }
-
-              @JavascriptInterface
-              public void initialize() {
-                  // Initialization is performed by configure().
-              }
-
-              @JavascriptInterface
-              public boolean isReady() {
-                  return initialized;
-              }
-
-              @JavascriptInterface
-              public void showBanner() {
-                  activity.runOnUiThread(() -> {
-                      if (bannerId.isEmpty()) return;
-
-                      if (bannerView != null) {
-                          bannerView.setVisibility(View.VISIBLE);
-                          return;
-                      }
-
-                      bannerView = new AdView(activity);
-                      bannerView.setAdUnitId(bannerId);
-                      bannerView.setAdSize(AdSize.BANNER);
-
-                      FrameLayout.LayoutParams params =
-                          new FrameLayout.LayoutParams(
-                              ViewGroup.LayoutParams.MATCH_PARENT,
-                              ViewGroup.LayoutParams.WRAP_CONTENT,
-                              Gravity.BOTTOM
-                          );
-
-                      activity.addContentView(bannerView, params);
-                      bannerView.loadAd(new AdRequest.Builder().build());
-                  });
-              }
-
-              @JavascriptInterface
-              public void hideBanner() {
-                  activity.runOnUiThread(() -> {
-                      if (bannerView != null) {
-                          bannerView.setVisibility(View.GONE);
-                      }
-                  });
-              }
-
-              private void loadInterstitial() {
-                  if (interstitialId.isEmpty()) return;
-
-                  InterstitialAd.load(
-                      activity,
-                      interstitialId,
-                      new AdRequest.Builder().build(),
-                      new InterstitialAdLoadCallback() {
-                          @Override
-                          public void onAdLoaded(InterstitialAd ad) {
-                              interstitialAd = ad;
-                          }
-
-                          @Override
-                          public void onAdFailedToLoad(LoadAdError error) {
-                              interstitialAd = null;
-                          }
-                      }
-                  );
-              }
-
-              @JavascriptInterface
-              public void showInterstitial() {
-                  activity.runOnUiThread(() -> {
-                      if (interstitialAd == null) {
-                          loadInterstitial();
-                          return;
-                      }
-
-                      interstitialAd.setFullScreenContentCallback(
-                          new FullScreenContentCallback() {
-                              @Override
-                              public void onAdDismissedFullScreenContent() {
-                                  interstitialAd = null;
-                                  loadInterstitial();
-                              }
-
-                              @Override
-                              public void onAdFailedToShowFullScreenContent(
-                                      com.google.android.gms.ads.AdError error) {
-                                  interstitialAd = null;
-                                  loadInterstitial();
-                              }
-                          }
-                      );
-
-                      interstitialAd.show(activity);
-                  });
-              }
-
-              private void loadRewarded() {
-                  if (rewardedId.isEmpty()) return;
-
-                  RewardedAd.load(
-                      activity,
-                      rewardedId,
-                      new AdRequest.Builder().build(),
-                      new RewardedAdLoadCallback() {
-                          @Override
-                          public void onAdLoaded(RewardedAd ad) {
-                              rewardedAd = ad;
-                          }
-
-                          @Override
-                          public void onAdFailedToLoad(LoadAdError error) {
-                              rewardedAd = null;
-                          }
-                      }
-                  );
-              }
-
-              @JavascriptInterface
-              public void showRewarded() {
-                  activity.runOnUiThread(() -> {
-                      if (rewardedAd == null) {
-                          loadRewarded();
-                          return;
-                      }
-
-                      rewardedAd.setFullScreenContentCallback(
-                          new FullScreenContentCallback() {
-                              @Override
-                              public void onAdDismissedFullScreenContent() {
-                                  rewardedAd = null;
-                                  loadRewarded();
-                              }
-                          }
-                      );
-
-                      rewardedAd.show(activity, rewardItem -> {
-                          int amount = rewardItem.getAmount();
-                          String type = rewardItem.getType();
-
-                          webView.post(() -> webView.evaluateJavascript(
-                              "if(window.onAdRewardEarned){"
-                              + "window.onAdRewardEarned("
-                              + amount + ",'"
-                              + type.replace("'", "") + "');}",
-                              null
-                          ));
-                      });
-                  });
-              }
-
-              private void loadNative() {
-                  if (nativeId.isEmpty()) return;
-
-                  AdLoader loader = new AdLoader.Builder(activity, nativeId)
-                      .forNativeAd(ad -> {
-                          if (nativeAd != null) {
-                              nativeAd.destroy();
-                          }
-                          nativeAd = ad;
-                      })
-                      .withNativeAdOptions(new NativeAdOptions.Builder().build())
-                      .withAdListener(new AdListener() {
-                          @Override
-                          public void onAdFailedToLoad(LoadAdError error) {
-                              nativeAd = null;
-                          }
-                      })
-                      .build();
-
-                  loader.loadAd(new AdRequest.Builder().build());
-              }
-
-              @JavascriptInterface
-              public void showNative() {
-                  activity.runOnUiThread(() -> {
-                      if (nativeAd == null) {
-                          loadNative();
-                          return;
-                      }
-
-                      NativeAdView adView = new NativeAdView(activity);
-                      FrameLayout container = new FrameLayout(activity);
-                      container.setBackgroundColor(Color.WHITE);
-                      container.setPadding(12, 8, 12, 8);
-
-                      TextView headline = new TextView(activity);
-                      headline.setTextColor(Color.BLACK);
-                      headline.setTextSize(16);
-                      headline.setMaxLines(2);
-
-                      TextView body = new TextView(activity);
-                      body.setTextColor(Color.DKGRAY);
-                      body.setTextSize(13);
-
-                      TextView button = new TextView(activity);
-                      button.setTextColor(Color.WHITE);
-                      button.setBackgroundColor(Color.rgb(30, 100, 210));
-                      button.setPadding(18, 10, 18, 10);
-
-                      FrameLayout.LayoutParams headlineParams =
-                          new FrameLayout.LayoutParams(
-                              ViewGroup.LayoutParams.MATCH_PARENT,
-                              ViewGroup.LayoutParams.WRAP_CONTENT
-                          );
-
-                      FrameLayout.LayoutParams bodyParams =
-                          new FrameLayout.LayoutParams(
-                              ViewGroup.LayoutParams.MATCH_PARENT,
-                              ViewGroup.LayoutParams.WRAP_CONTENT
-                          );
-                      bodyParams.topMargin = 48;
-
-                      FrameLayout.LayoutParams buttonParams =
-                          new FrameLayout.LayoutParams(
-                              ViewGroup.LayoutParams.WRAP_CONTENT,
-                              ViewGroup.LayoutParams.WRAP_CONTENT
-                          );
-                      buttonParams.topMargin = 92;
-
-                      container.addView(headline, headlineParams);
-                      container.addView(body, bodyParams);
-                      container.addView(button, buttonParams);
-
-                      adView.addView(container);
-                      adView.setHeadlineView(headline);
-                      adView.setBodyView(body);
-                      adView.setCallToActionView(button);
-
-                      headline.setText(nativeAd.getHeadline());
-                      body.setText(nativeAd.getBody());
-                      button.setText(nativeAd.getCallToAction());
-
-                      adView.setNativeAd(nativeAd);
-
-                      FrameLayout.LayoutParams params =
-                          new FrameLayout.LayoutParams(
-                              ViewGroup.LayoutParams.MATCH_PARENT,
-                              ViewGroup.LayoutParams.WRAP_CONTENT,
-                              Gravity.BOTTOM
-                          );
-
-                      activity.addContentView(adView, params);
-                  });
-              }
-
-              private void loadAppOpen() {
-                  if (appOpenId.isEmpty()) return;
-
-                  AppOpenAd.load(
-                      activity,
-                      appOpenId,
-                      new AdRequest.Builder().build(),
-                      new AppOpenAdLoadCallback() {
-                          @Override
-                          public void onAdLoaded(AppOpenAd ad) {
-                              appOpenAd = ad;
-
-                              if (!appOpenShown) {
-                                  appOpenShown = true;
-                                  showAppOpenInternal();
-                              }
-                          }
-
-                          @Override
-                          public void onAdFailedToLoad(LoadAdError error) {
-                              appOpenAd = null;
-                          }
-                      }
-                  );
-              }
-
-              private void showAppOpenInternal() {
-                  if (appOpenAd == null) {
-                      loadAppOpen();
-                      return;
-                  }
-
-                  appOpenAd.setFullScreenContentCallback(
-                      new FullScreenContentCallback() {
-                          @Override
-                          public void onAdDismissedFullScreenContent() {
-                              appOpenAd = null;
-                              loadAppOpen();
-                          }
-
-                          @Override
-                          public void onAdFailedToShowFullScreenContent(
-                                  com.google.android.gms.ads.AdError error) {
-                              appOpenAd = null;
-                              loadAppOpen();
-                          }
-                      }
-                  );
-
-                  appOpenAd.show(activity);
-              }
-
-              @JavascriptInterface
-              public void showAppOpen() {
-                  activity.runOnUiThread(this::showAppOpenInternal);
-              }
-          }
-          '''
-
-          bridge_code = bridge_code.replace("PACKAGE_NAME", package_name)
-
-          bridge_file = java_dir / "AdMobBridge.java"
-          bridge_file.write_text(bridge_code, encoding="utf-8")
-
-          print("AdMob Java bridge created.")
-          print("AdMob App ID configured.")
-          print("AdMob enabled for this build.")
-          PY
-
-          # Add Google Mobile Ads SDK dependency only for enabled builds.
-          if ! grep -q "play-services-ads" myapp/app/build.gradle; then
-            cat >> myapp/app/build.gradle <<'EOF'
-
-          dependencies {
-              implementation 'com.google.android.gms:play-services-ads:23.2.0'
-          }
-          EOF
-          fi
-
-          echo "AdMob SDK and Java bridge configured."
-
-      # ============================================================
-      # Verify AdMob configuration only if AdMob is enabled.
-      # ============================================================
-      - name: Verify New AdMob Integration
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          CONFIG="myapp/app/src/main/assets/admob.config.json"
-
-          if [ ! -f "$CONFIG" ]; then
-            echo "AdMob is not configured. Skipping verification."
-            exit 0
-          fi
-
-          ENABLED=$(python3 -c "import json; print(str(json.load(open('$CONFIG')).get('enabled', False)).lower())")
-
-          if [ "$ENABLED" != "true" ]; then
-            echo "AdMob disabled. Skipping verification."
-            exit 0
-          fi
-
-          grep -q "play-services-ads" myapp/app/build.gradle
-          grep -q "AdMobBridge" myapp/app/src/main/java/*/*/*/AdMobBridge.java 2>/dev/null || \
-          find myapp/app/src/main/java -name "AdMobBridge.java" | grep -q .
-
-          grep -q "com.google.android.gms.ads.APPLICATION_ID" \
-            myapp/app/src/main/AndroidManifest.xml
-
-          echo "AdMob integration verification passed."
-
-      # ============================================================
-      # Verify launcher icons AFTER AdMob manifest modification.
-      # ============================================================
-      - name: Verify Final Android Launcher Icons
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          python3 - <<'PY'
-          import xml.etree.ElementTree as ET
-          from pathlib import Path
-
-          android_ns = "http://schemas.android.com/apk/res/android"
-          manifest_path = Path("myapp/app/src/main/AndroidManifest.xml")
-
-          if not manifest_path.is_file():
-              raise SystemExit("ERROR: AndroidManifest.xml not found.")
-
-          tree = ET.parse(manifest_path)
-          application = tree.getroot().find("application")
-
-          if application is None:
-              raise SystemExit("ERROR: Application element not found.")
-
-          icon = application.get(f"{{{android_ns}}}icon")
-          round_icon = application.get(f"{{{android_ns}}}roundIcon")
-
-          print("Manifest icon:", icon)
-          print("Manifest roundIcon:", round_icon)
-
-          if icon == "@mipmap/ic_launcher":
-              if round_icon != "@mipmap/ic_launcher":
-                  raise SystemExit("ERROR: roundIcon is not configured.")
-
-              folders = [
-                  "mipmap-mdpi",
-                  "mipmap-hdpi",
-                  "mipmap-xhdpi",
-                  "mipmap-xxhdpi",
-                  "mipmap-xxxhdpi"
-              ]
-
-              for folder in folders:
-                  icon_file = (
-                      Path("myapp/app/src/main/res")
-                      / folder
-                      / "ic_launcher.png"
-                  )
-
-                  if not icon_file.is_file():
-                      raise SystemExit(
-                          "ERROR: Missing launcher icon: " + str(icon_file)
-                      )
-
-                  if icon_file.stat().st_size == 0:
-                      raise SystemExit(
-                          "ERROR: Empty launcher icon: " + str(icon_file)
-                      )
-
-                  print("VERIFIED:", icon_file)
-
-              print("CUSTOM LAUNCHER ICON VERIFICATION PASSED.")
-
-          else:
-              print(
-                  "No custom icon configured. "
-                  "This build will use the Android default icon."
-              )
-          PY
-
-      # ============================================================
-      # AndroidX (ADDED) — Jetifier + AndroidX support
-      # ============================================================
-      - name: Enable AndroidX
-        run: |
-          cat > myapp/gradle.properties <<'EOF'
-          android.useAndroidX=true
-          android.enableJetifier=true
+          mkdir -p gradle/wrapper
+
+          cat > gradle/wrapper/gradle-wrapper.properties <<'EOF'
+          distributionBase=GRADLE_USER_HOME
+          distributionPath=wrapper/dists
+          distributionUrl=https\://services.gradle.org/distributions/gradle-8.0-all.zip
+          zipStoreBase=GRADLE_USER_HOME
+          zipStorePath=wrapper/dists
           EOF
 
-      - name: Install Gradle 8.0
+      - name: Verify AndroidX Configuration
+        working-directory: myapp
         run: |
-          curl -fsSL https://services.gradle.org/distributions/gradle-8.0-bin.zip -o /tmp/gradle.zip
-          unzip -q /tmp/gradle.zip -d /tmp
-          /tmp/gradle-8.0/bin/gradle wrapper --gradle-version 8.0 --project-dir myapp
+          if ! grep -q "android.useAndroidX=true" gradle.properties; then
+            echo "android.useAndroidX=true" >> gradle.properties
+          fi
+          if ! grep -q "android.enableJetifier=true" gradle.properties; then
+            echo "android.enableJetifier=true" >> gradle.properties
+          fi
 
       - name: Build APK
+        working-directory: myapp
         run: |
-          cd myapp
           chmod +x gradlew
-          ./gradlew assembleDebug
+          ./gradlew assembleDebug --no-daemon
+          mkdir -p ../release
+          cp app/build/outputs/apk/debug/app-debug.apk ../release/app-${BUILD_ID}.apk
 
-      - name: Upload APK to Public GitHub Release
+      - name: Upload APK to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: apk-${{ github.event.client_payload.buildId }}
+          name: APK Build ${{ github.event.client_payload.buildId }}
+          files: release/app-${{ github.event.client_payload.buildId }}.apk
+          fail_on_unmatched_files: true
+          make_latest: false
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          BUILD_ID: ${{ github.event.client_payload.buildId }}
-        run: |
-          APK="myapp/app/build/outputs/apk/debug/app-debug.apk"
-          TAG="apk-${BUILD_ID}"
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-          if [ ! -f "$APK" ]; then
-            echo "ERROR: APK file not found."
-            exit 1
-          fi
-
-          gh release create "$TAG" "$APK" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "APK ${BUILD_ID}" \
-            --notes "Your APK build is complete."
-
-      - name: Delete Temporary Build Branch
+      - name: Cleanup Temporary Build Branch
         if: always()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          BUILD_REF: ${{ github.event.client_payload.ref }}
         run: |
-          if [ -n "$BUILD_REF" ]; then
-            gh api \
-              --method DELETE \
-              "repos/${GITHUB_REPOSITORY}/git/refs/heads/${BUILD_REF}" \
-              || echo "Temporary branch was already deleted."
-          fi
-
-      # ============================================================
-      # Delete Temporary Build Branch (ADDED — fallback, github.token)
-      # Original fallback step preserved.
-      # ============================================================
-      - name: Delete Temporary Build Branch
-        env:
-          GH_TOKEN: ${{ github.token }}
-          BUILD_REF: ${{ github.event.client_payload.ref }}
-        run: |
-          if [ -n "$BUILD_REF" ]; then
-            gh api \
-              --method DELETE \
-              "repos/${GITHUB_REPOSITORY}/git/refs/heads/${BUILD_REF}" \
-              || echo "Temporary branch was already deleted."
+          BUILD_REF="${{ github.event.client_payload.ref }}"
+          if [[ "$BUILD_REF" == source/.build-input/* ]]; then
+            git push origin --delete "$BUILD_REF" || true
           fi
