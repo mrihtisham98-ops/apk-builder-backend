@@ -859,9 +859,6 @@ app.post('/api/gemini-chat', async (req, res) => {
 
 // ============================================================
 // MULTI-PROVIDER BYOK SYSTEM
-// OpenAI + Groq + Gemini + DeepSeek
-// User supplies their own API key.
-// No automatic provider fallback.
 // ============================================================
 
 const BYOK_PROVIDERS = {
@@ -908,7 +905,6 @@ const BYOK_PROVIDERS = {
     }
 };
 
-// Validate user-supplied API key.
 function byokValidateKey(apiKey) {
     if (
         typeof apiKey !== 'string' ||
@@ -922,7 +918,6 @@ function byokValidateKey(apiKey) {
     return apiKey.trim();
 }
 
-// Validate and normalize chat messages.
 function byokNormalizeMessages(messages) {
     if (!Array.isArray(messages) || messages.length === 0) {
         throw new Error('Messages are required.');
@@ -952,7 +947,6 @@ function byokNormalizeMessages(messages) {
     });
 }
 
-// Create Gemini request body.
 function byokBuildGeminiBody(messages, maxTokens, temperature) {
     const systemMessages = [];
     const contents = [];
@@ -989,7 +983,6 @@ function byokBuildGeminiBody(messages, maxTokens, temperature) {
     return body;
 }
 
-// Call one selected BYOK provider.
 async function byokCallProvider(providerKey, apiKey, model, messages, options = {}) {
     const provider = BYOK_PROVIDERS[providerKey];
 
@@ -1098,7 +1091,6 @@ async function byokCallProvider(providerKey, apiKey, model, messages, options = 
     };
 }
 
-// Convert provider errors into readable messages.
 function byokGetError(error, providerKey) {
     const status = error.response?.status || error.status || 502;
 
@@ -1133,7 +1125,6 @@ function byokGetError(error, providerKey) {
 
 // ============================================================
 // BYOK CHAT ENDPOINT
-// POST /api/ai/providers/:provider/chat
 // ============================================================
 
 app.post('/api/ai/providers/:provider/chat', async (req, res) => {
@@ -1197,7 +1188,6 @@ app.post('/api/ai/providers/:provider/chat', async (req, res) => {
 
 // ============================================================
 // BYOK API KEY + MODEL TEST ENDPOINT
-// POST /api/ai/providers/:provider/test
 // ============================================================
 
 app.post('/api/ai/providers/:provider/test', async (req, res) => {
@@ -1212,7 +1202,6 @@ app.post('/api/ai/providers/:provider/test', async (req, res) => {
         }
 
         const { apiKey, model } = req.body || {};
-
         const provider = BYOK_PROVIDERS[providerKey];
 
         const result = await byokCallProvider(
@@ -1254,9 +1243,141 @@ app.post('/api/ai/providers/:provider/test', async (req, res) => {
 });
 
 // ============================================================
+// LIVE PROVIDER MODELS API
+// GET /api/ai/providers/:provider/models
+// API KEY IS SENT IN REQUEST BODY
+// ============================================================
+
+app.post('/api/ai/providers/:provider/models', async (req, res) => {
+    const providerKey = String(req.params.provider || '').toLowerCase();
+
+    try {
+        if (!BYOK_PROVIDERS[providerKey]) {
+            return res.status(400).json({
+                success: false,
+                error: 'Unsupported AI provider.'
+            });
+        }
+
+        const apiKey = byokValidateKey(req.body?.apiKey);
+
+        let models = [];
+
+        if (providerKey === 'openai') {
+            const response = await axios.get(
+                'https://api.openai.com/v1/models',
+                {
+                    headers: {
+                        Authorization: `Bearer ${apiKey}`
+                    },
+                    timeout: 30000
+                }
+            );
+
+            models = (response.data?.data || [])
+                .filter(item => item.id)
+                .map(item => ({
+                    id: item.id,
+                    name: item.id
+                }))
+                .sort((a, b) => a.id.localeCompare(b.id));
+
+        } else if (providerKey === 'groq') {
+            const response = await axios.get(
+                'https://api.groq.com/openai/v1/models',
+                {
+                    headers: {
+                        Authorization: `Bearer ${apiKey}`
+                    },
+                    timeout: 30000
+                }
+            );
+
+            models = (response.data?.data || [])
+                .filter(item => item.id)
+                .map(item => ({
+                    id: item.id,
+                    name: item.id
+                }))
+                .sort((a, b) => a.id.localeCompare(b.id));
+
+        } else if (providerKey === 'gemini') {
+            const response = await axios.get(
+                'https://generativelanguage.googleapis.com/v1beta/models',
+                {
+                    headers: {
+                        'x-goog-api-key': apiKey
+                    },
+                    params: {
+                        pageSize: 1000
+                    },
+                    timeout: 30000
+                }
+            );
+
+            models = (response.data?.models || [])
+                .filter(item =>
+                    item.name &&
+                    (
+                        !item.supportedGenerationMethods ||
+                        item.supportedGenerationMethods.includes('generateContent')
+                    )
+                )
+                .map(item => ({
+                    id: item.name.replace(/^models\//, ''),
+                    name: item.displayName || item.name,
+                    description: item.description || ''
+                }))
+                .sort((a, b) => a.id.localeCompare(b.id));
+
+        } else if (providerKey === 'deepseek') {
+            const response = await axios.get(
+                'https://api.deepseek.com/models',
+                {
+                    headers: {
+                        Authorization: `Bearer ${apiKey}`
+                    },
+                    timeout: 30000
+                }
+            );
+
+            models = (response.data?.data || [])
+                .filter(item => item.id)
+                .map(item => ({
+                    id: item.id,
+                    name: item.id
+                }))
+                .sort((a, b) => a.id.localeCompare(b.id));
+        }
+
+        return res.json({
+            success: true,
+            provider: providerKey,
+            count: models.length,
+            models
+        });
+
+    } catch (error) {
+        const result = byokGetError(error, providerKey);
+
+        console.error('[LIVE MODELS ERROR]', {
+            provider: providerKey,
+            status: result.status,
+            message: result.message.slice(0, 500)
+        });
+
+        return res.status(result.status).json({
+            success: false,
+            provider: providerKey,
+            error: result.message,
+            models: []
+        });
+    }
+});
+
+// ============================================================
 // PROVIDER + MODEL LIST
 // GET /api/ai/providers
-// No API keys are returned.
 // ============================================================
 
 app.get('/api/ai/providers', (req, res) => {
@@ -1274,248 +1395,445 @@ app.get('/api/ai/providers', (req, res) => {
 });
 
 // ============================================================
-// WEB APP STUDIO - AI CODING AGENT
-// BYOK: USER SUPPLIES THEIR OWN API KEY
+// AI CODING AGENT
 // ============================================================
 
 const AGENT_MAX_STEPS = 5;
-const AGENT_MAX_FILES = 100;
-const AGENT_MAX_FILE_SIZE = 1024 * 1024;
-const AGENT_MAX_TOTAL_SIZE = 5 * 1024 * 1024;
-const AGENT_MAX_ACTIONS = 30;
+const AGENT_MAX_FILES = 200;
+const AGENT_MAX_FILE_SIZE = 2 * 1024 * 1024;
+const AGENT_MAX_TOTAL_SIZE = 10 * 1024 * 1024;
 
-// Validate paths to prevent directory traversal.
+// ------------------------------------------------------------
+// SAFE FILE PATH
+// ------------------------------------------------------------
+
 function agentSafePath(filePath) {
     if (typeof filePath !== 'string' || !filePath.trim()) {
         throw new Error('Invalid file path.');
     }
 
-    const normalized = filePath
+    let normalized = filePath
         .replace(/\\/g, '/')
-        .replace(/^\/+/, '');
-
-    const parts = normalized.split('/');
+        .replace(/^\/+/, '')
+        .trim();
 
     if (
-        parts.some(part =>
-            !part ||
-            part === '.' ||
-            part === '..' ||
-            part.includes('\0')
-        )
+        normalized.includes('\0') ||
+        normalized.split('/').some(part => part === '..') ||
+        normalized.startsWith('../')
     ) {
-        throw new Error('Unsafe file path: ' + filePath);
+        throw new Error('Unsafe file path rejected.');
+    }
+
+    normalized = normalized.replace(/\/+/g, '/');
+
+    if (!normalized || normalized === '.') {
+        throw new Error('Invalid file path.');
     }
 
     return normalized;
 }
 
-// Prepare a nested project object for the agent.
-function agentPrepareFiles(files) {
-    const flattened = flattenFiles(files);
-    const result = {};
-    let totalSize = 0;
+// ------------------------------------------------------------
+// NORMALIZE PROJECT FILES
+// ------------------------------------------------------------
 
-    if (flattened.length > AGENT_MAX_FILES) {
+function agentPrepareFiles(inputFiles) {
+    const result = {};
+
+    if (!inputFiles) {
+        return result;
+    }
+
+    if (Array.isArray(inputFiles)) {
+        for (const file of inputFiles) {
+            if (!file || typeof file !== 'object') continue;
+
+            const filePath = agentSafePath(
+                file.path || file.name || file.filename
+            );
+
+            const content =
+                typeof file.content === 'string'
+                    ? file.content
+                    : '';
+
+            result[filePath] = content;
+        }
+    } else if (typeof inputFiles === 'object') {
+        for (const [filePath, content] of Object.entries(inputFiles)) {
+            const safePath = agentSafePath(filePath);
+
+            if (typeof content === 'string') {
+                result[safePath] = content;
+            } else if (
+                content &&
+                typeof content === 'object' &&
+                typeof content.content === 'string'
+            ) {
+                result[safePath] = content.content;
+            }
+        }
+    } else {
+        throw new Error('Project files must be an object or array.');
+    }
+
+    const entries = Object.entries(result);
+
+    if (entries.length > AGENT_MAX_FILES) {
         throw new Error(
-            `Maximum ${AGENT_MAX_FILES} project files are supported.`
+            `Maximum ${AGENT_MAX_FILES} project files are allowed.`
         );
     }
 
-    for (const file of flattened) {
-        const safePath = agentSafePath(file.path);
-        const size = Buffer.byteLength(file.content, 'utf8');
+    let totalSize = 0;
+
+    for (const [filePath, content] of entries) {
+        const size = Buffer.byteLength(content, 'utf8');
 
         if (size > AGENT_MAX_FILE_SIZE) {
-            throw new Error(`File is too large: ${safePath}`);
+            throw new Error(
+                `File is too large: ${filePath}`
+            );
         }
 
         totalSize += size;
+    }
 
-        if (totalSize > AGENT_MAX_TOTAL_SIZE) {
-            throw new Error('AI Agent project limit is 5 MB.');
-        }
-
-        result[safePath] = file.content;
+    if (totalSize > AGENT_MAX_TOTAL_SIZE) {
+        throw new Error('Total project file size is too large.');
     }
 
     return result;
 }
 
-// Convert a flat project map back into a nested object.
-function agentNestedFiles(flatFiles) {
-    const nested = {};
+// ------------------------------------------------------------
+// CONVERT FLAT FILES TO NESTED OBJECT
+// ------------------------------------------------------------
 
-    for (const [filePath, content] of Object.entries(flatFiles)) {
+function agentNestedFiles(files) {
+    const output = {};
+
+    for (const [filePath, content] of Object.entries(files || {})) {
         const safePath = agentSafePath(filePath);
         const parts = safePath.split('/');
-        let current = nested;
 
-        for (let index = 0; index < parts.length - 1; index++) {
-            const part = parts[index];
+        let current = output;
 
+        for (let i = 0; i < parts.length - 1; i++) {
             if (
-                !current[part] ||
-                typeof current[part] !== 'object' ||
-                Array.isArray(current[part])
+                !current[parts[i]] ||
+                typeof current[parts[i]] !== 'object'
             ) {
-                current[part] = {};
+                current[parts[i]] = {};
             }
 
-            current = current[part];
+            current = current[parts[i]];
         }
 
         current[parts[parts.length - 1]] = content;
     }
 
-    return nested;
+    return output;
 }
 
-// Parse the JSON returned by the AI.
-function agentParseJSON(text) {
-    if (typeof text !== 'string') {
-        throw new Error('AI returned an invalid response.');
+// ------------------------------------------------------------
+// PARSE AI JSON RESPONSE
+// ------------------------------------------------------------
+
+function agentParseJSON(content) {
+    if (typeof content !== 'string') {
+        throw new Error('AI returned an empty response.');
     }
 
-    let cleaned = text.trim();
+    let cleaned = content.trim();
 
     cleaned = cleaned
         .replace(/^```(?:json)?\s*/i, '')
-        .replace(/\s*```$/, '')
+        .replace(/\s*```$/i, '')
         .trim();
 
     try {
         return JSON.parse(cleaned);
-    } catch (_) {
-        const first = cleaned.indexOf('{');
-        const last = cleaned.lastIndexOf('}');
+    } catch (error) {
+        const firstBrace = cleaned.indexOf('{');
+        const lastBrace = cleaned.lastIndexOf('}');
 
-        if (first !== -1 && last > first) {
-            return JSON.parse(cleaned.slice(first, last + 1));
+        if (firstBrace !== -1 && lastBrace > firstBrace) {
+            return JSON.parse(
+                cleaned.substring(firstBrace, lastBrace + 1)
+            );
         }
 
         throw new Error(
-            'AI did not return valid agent instructions. Please try again.'
+            'AI response JSON format mein nahi hai.'
         );
     }
 }
 
-// ============================================================
-// USER API KEY VALIDATION
-// ============================================================
+// ------------------------------------------------------------
+// VALIDATE USER API KEY
+// ------------------------------------------------------------
 
-function agentValidateApiKey(apiKey) {
-    if (typeof apiKey !== 'string') {
-        throw new Error('Please enter your own AI API key.');
+function agentValidateApiKey(provider, apiKey) {
+    const allowedProviders = [
+        'openai',
+        'groq',
+        'gemini',
+        'deepseek'
+    ];
+
+    if (!allowedProviders.includes(provider)) {
+        throw new Error('Unsupported AI provider.');
     }
 
-    const key = apiKey.trim();
-
-    if (!key) {
-        throw new Error('Please enter your own AI API key.');
+    if (
+        typeof apiKey !== 'string' ||
+        apiKey.trim().length < 10 ||
+        apiKey.length > 500
+    ) {
+        throw new Error('Valid API key required.');
     }
 
-    if (key.length < 10 || key.length > 512) {
-        throw new Error('Invalid API key length.');
-    }
-
-    if (/[\r\n]/.test(key)) {
-        throw new Error('Invalid API key format.');
-    }
-
-    return key;
+    return true;
 }
 
-// ============================================================
-// CALL SELECTED PROVIDER USING THE USER'S OWN API KEY
-// OpenAI + Groq + Gemini + DeepSeek
-// ============================================================
+// ------------------------------------------------------------
+// CALL SELECTED AI PROVIDER
+// ------------------------------------------------------------
 
-async function agentCallProvider(provider, messages, userApiKey, customModel) {
-    if (!userApiKey) {
-        throw new Error('Your API key is missing. Please connect your API key.');
+async function agentCallProvider(
+    provider,
+    apiKey,
+    model,
+    messages
+) {
+    agentValidateApiKey(provider, apiKey);
+
+    if (!Array.isArray(messages) || messages.length === 0) {
+        throw new Error('AI messages are required.');
     }
 
-    const selectedModel =
-        customModel ||
-        BYOK_PROVIDERS[provider]?.defaultModel;
+    const timeout = 120000;
 
-    if (!selectedModel) {
-        throw new Error('Unsupported AI provider or missing model.');
-    }
+    try {
+        // OPENAI
+        if (provider === 'openai') {
+            const response = await axios.post(
+                'https://api.openai.com/v1/chat/completions',
+                {
+                    model: model || 'gpt-4.1-mini',
+                    messages,
+                    temperature: 0.2
+                },
+                {
+                    timeout,
+                    headers: {
+                        Authorization: `Bearer ${apiKey}`,
+                        'Content-Type': 'application/json'
+                    }
+                }
+            );
 
-    const result = await byokCallProvider(
-        provider,
-        userApiKey,
-        selectedModel,
-        messages,
-        {
-            temperature: 0.2,
-            maxTokens: 8192
+            return response.data?.choices?.[0]?.message?.content || '';
         }
-    );
 
-    return {
-        text: result.content,
-        provider: result.provider,
-        model: result.model,
-        fallback: false
-    };
+        // GROQ
+        if (provider === 'groq') {
+            const response = await axios.post(
+                'https://api.groq.com/openai/v1/chat/completions',
+                {
+                    model: model || 'openai/gpt-oss-20b',
+                    messages,
+                    temperature: 0.2
+                },
+                {
+                    timeout,
+                    headers: {
+                        Authorization: `Bearer ${apiKey}`,
+                        'Content-Type': 'application/json'
+                    }
+                }
+            );
+
+            return response.data?.choices?.[0]?.message?.content || '';
+        }
+
+        // DEEPSEEK
+        if (provider === 'deepseek') {
+            const response = await axios.post(
+                'https://api.deepseek.com/chat/completions',
+                {
+                    model: model || 'deepseek-chat',
+                    messages,
+                    temperature: 0.2
+                },
+                {
+                    timeout,
+                    headers: {
+                        Authorization: `Bearer ${apiKey}`,
+                        'Content-Type': 'application/json'
+                    }
+                }
+            );
+
+            return response.data?.choices?.[0]?.message?.content || '';
+        }
+
+        // GEMINI
+        if (provider === 'gemini') {
+            const selectedModel = (
+                model || 'gemini-2.5-flash'
+            ).replace(/^models\//, '');
+
+            const systemMessages = messages
+                .filter(message => message.role === 'system')
+                .map(message => message.content)
+                .join('\n\n');
+
+            const contents = messages
+                .filter(message =>
+                    message.role !== 'system'
+                )
+                .map(message => ({
+                    role:
+                        message.role === 'assistant'
+                            ? 'model'
+                            : 'user',
+                    parts: [
+                        {
+                            text: String(message.content || '')
+                        }
+                    ]
+                }));
+
+            const response = await axios.post(
+                `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(selectedModel)}:generateContent`,
+                {
+                    systemInstruction: systemMessages
+                        ? {
+                            parts: [{ text: systemMessages }]
+                        }
+                        : undefined,
+                    contents,
+                    generationConfig: {
+                        temperature: 0.2,
+                        responseMimeType: 'application/json'
+                    }
+                },
+                {
+                    timeout,
+                    headers: {
+                        'x-goog-api-key': apiKey,
+                        'Content-Type': 'application/json'
+                    }
+                }
+            );
+
+            return (
+                response.data?.candidates?.[0]
+                    ?.content?.parts
+                    ?.map(part => part.text || '')
+                    .join('') || ''
+            );
+        }
+
+        throw new Error('Unsupported AI provider.');
+
+    } catch (error) {
+        const providerMessage =
+            error.response?.data?.error?.message ||
+            error.response?.data?.error ||
+            error.response?.data?.message ||
+            error.message;
+
+        throw new Error(
+            `${provider.toUpperCase()} API Error: ${String(providerMessage).slice(0, 1000)}`
+        );
+    }
 }
 
-// Execute AI file actions in a virtual project.
+// ------------------------------------------------------------
+// EXECUTE AI FILE ACTIONS
+// ------------------------------------------------------------
+
 function agentExecuteActions(files, actions) {
-    const results = [];
     const changedFiles = [];
     const deletedFiles = [];
+    const results = [];
 
     if (!Array.isArray(actions)) {
-        throw new Error('AI returned invalid actions.');
+        throw new Error('AI actions must be an array.');
     }
 
-    if (actions.length > AGENT_MAX_ACTIONS) {
+    if (actions.length > AGENT_MAX_STEPS) {
         throw new Error(
-            `Maximum ${AGENT_MAX_ACTIONS} actions allowed per step.`
+            `AI can perform maximum ${AGENT_MAX_STEPS} actions per request.`
         );
     }
 
     for (const action of actions) {
-        if (!action || typeof action.type !== 'string') {
-            throw new Error('Invalid agent action.');
+        if (!action || typeof action !== 'object') {
+            continue;
         }
 
-        if (action.type === 'list_files') {
+        const type = String(
+            action.type || action.action || ''
+        ).toLowerCase();
+
+        // LIST FILES
+        if (type === 'list' || type === 'list_files') {
             results.push({
-                type: action.type,
+                action: type,
                 files: Object.keys(files)
             });
 
             continue;
         }
 
-        if (action.type === 'read_file') {
-            const path = agentSafePath(action.path);
+        // READ FILE
+        if (type === 'read' || type === 'read_file') {
+            const filePath = agentSafePath(
+                action.path || action.file
+            );
+
+            if (!Object.prototype.hasOwnProperty.call(files, filePath)) {
+                results.push({
+                    action: type,
+                    path: filePath,
+                    error: 'File not found.'
+                });
+
+                continue;
+            }
 
             results.push({
-                type: action.type,
-                path,
-                content: files[path] ?? null,
-                exists: Object.prototype.hasOwnProperty.call(files, path)
+                action: type,
+                path: filePath,
+                content: files[filePath]
             });
 
             continue;
         }
 
-        if (action.type === 'search_files') {
-            const query = String(action.query || '');
+        // SEARCH PROJECT
+        if (type === 'search' || type === 'search_files') {
+            const query = String(
+                action.query || action.search || ''
+            );
 
-            if (!query || query.length > 500) {
-                throw new Error('Invalid search query.');
+            if (!query) {
+                results.push({
+                    action: type,
+                    error: 'Search query required.'
+                });
+
+                continue;
             }
 
             const matches = [];
 
-            for (const [path, content] of Object.entries(files)) {
+            for (const [filePath, content] of Object.entries(files)) {
                 const lines = content.split('\n');
 
                 lines.forEach((line, index) => {
@@ -1523,9 +1841,9 @@ function agentExecuteActions(files, actions) {
                         line.toLowerCase().includes(query.toLowerCase())
                     ) {
                         matches.push({
-                            path,
+                            path: filePath,
                             line: index + 1,
-                            content: line.slice(0, 500)
+                            content: line.trim().slice(0, 500)
                         });
                     }
                 });
@@ -1534,367 +1852,315 @@ function agentExecuteActions(files, actions) {
             }
 
             results.push({
-                type: action.type,
+                action: type,
+                query,
                 matches
             });
 
             continue;
         }
 
-        if (action.type === 'write_file') {
-            const path = agentSafePath(action.path);
+        // CREATE OR UPDATE FILE
+        if (
+            type === 'write' ||
+            type === 'write_file' ||
+            type === 'create_file' ||
+            type === 'update_file'
+        ) {
+            const filePath = agentSafePath(
+                action.path || action.file
+            );
 
             if (typeof action.content !== 'string') {
-                throw new Error('File content must be text.');
-            }
-
-            const size = Buffer.byteLength(action.content, 'utf8');
-
-            if (size > AGENT_MAX_FILE_SIZE) {
-                throw new Error(`Edited file is too large: ${path}`);
-            }
-
-            files[path] = action.content;
-
-            changedFiles.push(path);
-
-            results.push({
-                type: action.type,
-                path,
-                success: true
-            });
-
-            continue;
-        }
-
-        if (action.type === 'delete_file') {
-            const path = agentSafePath(action.path);
-
-            if (!Object.prototype.hasOwnProperty.call(files, path)) {
                 results.push({
-                    type: action.type,
-                    path,
-                    success: false,
-                    message: 'File does not exist.'
+                    action: type,
+                    path: filePath,
+                    error: 'File content must be a string.'
                 });
 
                 continue;
             }
 
-            delete files[path];
+            const newSize = Buffer.byteLength(
+                action.content,
+                'utf8'
+            );
 
-            deletedFiles.push(path);
+            if (newSize > AGENT_MAX_FILE_SIZE) {
+                throw new Error(
+                    `Generated file is too large: ${filePath}`
+                );
+            }
+
+            const isNew = !Object.prototype.hasOwnProperty.call(
+                files,
+                filePath
+            );
+
+            files[filePath] = action.content;
+
+            if (!changedFiles.includes(filePath)) {
+                changedFiles.push(filePath);
+            }
 
             results.push({
-                type: action.type,
-                path,
-                success: true
+                action: type,
+                path: filePath,
+                status: isNew ? 'created' : 'updated'
             });
 
             continue;
         }
 
-        throw new Error('Unsupported agent action: ' + action.type);
+        // DELETE FILE
+        if (type === 'delete' || type === 'delete_file') {
+            const filePath = agentSafePath(
+                action.path || action.file
+            );
+
+            if (
+                Object.prototype.hasOwnProperty.call(files, filePath)
+            ) {
+                delete files[filePath];
+
+                deletedFiles.push(filePath);
+
+                results.push({
+                    action: type,
+                    path: filePath,
+                    status: 'deleted'
+                });
+            } else {
+                results.push({
+                    action: type,
+                    path: filePath,
+                    error: 'File not found.'
+                });
+            }
+
+            continue;
+        }
+
+        results.push({
+            action: type || 'unknown',
+            error: 'Unsupported action.'
+        });
     }
 
-    let totalSize = 0;
-
-    for (const content of Object.values(files)) {
-        totalSize += Buffer.byteLength(content, 'utf8');
-    }
+    const totalSize = Object.values(files).reduce(
+        (total, content) =>
+            total + Buffer.byteLength(content, 'utf8'),
+        0
+    );
 
     if (Object.keys(files).length > AGENT_MAX_FILES) {
-        throw new Error('Agent exceeded the maximum project file count.');
+        throw new Error('Maximum project file count exceeded.');
     }
 
     if (totalSize > AGENT_MAX_TOTAL_SIZE) {
-        throw new Error('Agent exceeded the 5 MB project limit.');
+        throw new Error('Total project size limit exceeded.');
     }
 
     return {
-        results,
-        changedFiles: [...new Set(changedFiles)],
-        deletedFiles: [...new Set(deletedFiles)]
+        files,
+        nestedFiles: agentNestedFiles(files),
+        changedFiles,
+        deletedFiles,
+        results
     };
 }
 
-// ============================================================
-// AI AGENT ENDPOINT - BYOK
-// ============================================================
+// ------------------------------------------------------------
+// AI CODING AGENT ENDPOINT
+// ------------------------------------------------------------
 
 app.post('/api/ai-agent', async (req, res) => {
     try {
         const {
-            provider = 'groq',
+            provider,
             apiKey,
             model,
-            task,
-            files: submittedFiles
+            prompt,
+            message,
+            files: inputFiles,
+            history
         } = req.body || {};
 
-        if (!['openai', 'groq', 'gemini', 'deepseek'].includes(provider)) {
+        // Validate provider and user's own API key
+        agentValidateApiKey(provider, apiKey);
+
+        const userPrompt = String(
+            prompt || message || ''
+        ).trim();
+
+        if (!userPrompt) {
             return res.status(400).json({
                 success: false,
-                error: 'Invalid AI provider.'
+                error: 'Please enter your coding instruction.'
             });
         }
 
-        let userApiKey;
-
-        try {
-            userApiKey = agentValidateApiKey(apiKey);
-        } catch (keyError) {
+        if (userPrompt.length > 30000) {
             return res.status(400).json({
                 success: false,
-                error: keyError.message,
-                code: 'API_KEY_REQUIRED'
+                error: 'Prompt is too long.'
             });
         }
 
-        if (
-            model !== undefined &&
-            (
-                typeof model !== 'string' ||
-                !model.trim() ||
-                model.length > 150
-            )
-        ) {
-            return res.status(400).json({
-                success: false,
-                error: 'Invalid model name.'
-            });
-        }
+        // Prepare project files
+        const projectFiles = agentPrepareFiles(inputFiles);
 
-        if (
-            typeof task !== 'string' ||
-            !task.trim() ||
-            task.length > 12000
-        ) {
-            return res.status(400).json({
-                success: false,
-                error: 'Please provide a task. Maximum 12000 characters.'
-            });
-        }
-
-        if (
-            !submittedFiles ||
-            typeof submittedFiles !== 'object' ||
-            Array.isArray(submittedFiles)
-        ) {
-            return res.status(400).json({
-                success: false,
-                error: 'Project files are required.'
-            });
-        }
-
-        const virtualFiles = agentPrepareFiles(submittedFiles);
-
-        if (!Object.keys(virtualFiles).length) {
-            return res.status(400).json({
-                success: false,
-                error: 'The project contains no files.'
-            });
-        }
+        // Limit conversation history
+        const safeHistory = Array.isArray(history)
+            ? history
+                .filter(item =>
+                    item &&
+                    ['user', 'assistant'].includes(item.role) &&
+                    typeof item.content === 'string'
+                )
+                .slice(-10)
+                .map(item => ({
+                    role: item.role,
+                    content: item.content.slice(0, 12000)
+                }))
+            : [];
 
         const systemPrompt = `
-You are the Web App Studio autonomous coding agent.
+You are an expert AI Coding Agent working inside Web App Studio.
 
-Your job is to understand and modify the user's submitted project.
+YOUR MAIN JOB:
+Understand the user's instruction, inspect the provided project files,
+and make the requested code changes.
 
-You can inspect files and make changes using the actions below.
+IMPORTANT RULES:
 
-You MUST return ONLY valid JSON. Do not use Markdown fences.
+1. Preserve existing code and project structure.
+2. Do not delete existing code unless the user explicitly asks.
+3. Do not rewrite an entire file when a small change is enough.
+4. Do not remove existing features, buttons, functions, styles,
+   event listeners, integrations, or working logic.
+5. Keep existing IDs, class names, variable names, and function names
+   unless changing them is necessary for the requested task.
+6. When updating a file, return its complete updated content.
+7. Never use placeholder comments instead of actual implementation.
+8. Do not claim that a change was made unless you provide the
+   corresponding write action.
+9. If the user asks a question without requesting a code change,
+   explain the answer and do not modify files.
+10. If required information is missing, ask a clear question instead
+    of inventing project requirements.
+11. Do not create unnecessary files.
+12. Do not delete files unless the user clearly requested deletion.
 
-JSON format:
+AVAILABLE ACTIONS:
+
+- list: List project files.
+- read: Read a project file.
+- search: Search text inside project files.
+- write: Create or update a project file.
+- delete: Delete a file only when explicitly requested.
+
+RESPONSE FORMAT:
+
+Return ONLY valid JSON. Do not use Markdown code fences.
+
+Use this structure:
+
 {
-  "message": "Short explanation of your progress",
-  "actions": [],
-  "done": false
+  "message": "Explain what you did or answer the user.",
+  "actions": [
+    {
+      "type": "read",
+      "path": "index.html"
+    },
+    {
+      "type": "write",
+      "path": "index.html",
+      "content": "Complete updated file content"
+    }
+  ]
 }
 
-Available actions:
+If no file changes are required, return an empty actions array.
 
-1. Read a file:
-{"type":"read_file","path":"index.html"}
+Maximum ${AGENT_MAX_STEPS} actions in one response.
 
-2. List files:
-{"type":"list_files"}
-
-3. Search project:
-{"type":"search_files","query":"function renderApp"}
-
-4. Create or completely update a file:
-{"type":"write_file","path":"index.html","content":"FULL FILE CONTENT"}
-
-5. Delete a file:
-{"type":"delete_file","path":"old-file.js"}
-
-Rules:
-
-- Work only with the submitted project files.
-- Never access server files or run operating-system commands.
-- Preserve existing features and code wherever possible.
-- Do not delete unrelated code.
-- When modifying a file, return its complete updated content.
-- You may edit multiple files in one step.
-- Read or search files when you need more information.
-- Do not delete files unless the user explicitly requests deletion.
-- Never claim code was tested unless it was actually tested.
-- Do not make unrelated design changes.
-- If the task is unclear, ask a question in message and set done=true.
-- When all requested changes are prepared, set done=true.
-- If another step is needed, set done=false.
-- Keep actions focused on the user's task.
+The project files supplied by the user are the source of truth.
+Do not assume files or code exist unless they are provided.
 `;
 
-        let conversation = [
+        const fileContext = JSON.stringify(
+            projectFiles,
+            null,
+            2
+        );
+
+        const messages = [
             {
                 role: 'system',
                 content: systemPrompt
             },
+            ...safeHistory,
             {
                 role: 'user',
                 content:
-                    `USER TASK:\n${task}\n\n` +
-                    `PROJECT FILES:\n${JSON.stringify(virtualFiles)}`
+                    `PROJECT FILES:\n${fileContext}\n\n` +
+                    `USER INSTRUCTION:\n${userPrompt}`
             }
         ];
 
-        let actualProvider = provider;
-        let finalMessage = '';
-        let completed = false;
+        // Call only the provider and API key selected by the user
+        const aiResponse = await agentCallProvider(
+            provider,
+            apiKey,
+            model,
+            messages
+        );
 
-        const allChangedFiles = new Set();
-        const allDeletedFiles = new Set();
-        const actionHistory = [];
+        const parsed = agentParseJSON(aiResponse);
 
-        for (let step = 0; step < AGENT_MAX_STEPS; step++) {
-            const modelResult = await agentCallProvider(
-                actualProvider,
-                conversation,
-                userApiKey,
-                model
-            );
+        const agentMessage =
+            typeof parsed.message === 'string'
+                ? parsed.message
+                : 'AI Coding Agent completed the request.';
 
-            actualProvider = modelResult.provider;
+        const actions = Array.isArray(parsed.actions)
+            ? parsed.actions
+            : [];
 
-            const instruction = agentParseJSON(modelResult.text);
-
-            finalMessage = String(
-                instruction.message || ''
-            ).slice(0, 5000);
-
-            const execution = agentExecuteActions(
-                virtualFiles,
-                instruction.actions || []
-            );
-
-            execution.changedFiles.forEach(path =>
-                allChangedFiles.add(path)
-            );
-
-            execution.deletedFiles.forEach(path =>
-                allDeletedFiles.add(path)
-            );
-
-            actionHistory.push({
-                step: step + 1,
-                actions: execution.results
-            });
-
-            if (instruction.done === true) {
-                completed = true;
-                break;
-            }
-
-            conversation.push({
-                role: 'assistant',
-                content: modelResult.text
-            });
-
-            conversation.push({
-                role: 'user',
-                content:
-                    'Execute the next step. Previous action results:\n' +
-                    JSON.stringify(execution.results) +
-                    '\n\nCurrent project files:\n' +
-                    JSON.stringify(virtualFiles) +
-                    '\n\nReturn the required JSON only.'
-            });
-        }
-
-        if (!completed) {
-            finalMessage +=
-                '\nAgent reached its maximum step limit. Some tasks may remain incomplete.';
-        }
+        // Apply the requested file actions
+        const execution = agentExecuteActions(
+            projectFiles,
+            actions
+        );
 
         return res.json({
             success: true,
-            completed,
-            message: finalMessage,
-            provider: actualProvider,
-            fallback: false,
-            billing: 'user_api_key',
-            changedFiles: [...allChangedFiles],
-            deletedFiles: [...allDeletedFiles],
-            files: agentNestedFiles(virtualFiles),
-            steps: actionHistory.length,
-            history: actionHistory,
-            note:
-                'The AI Agent used the API key supplied with this request. ' +
-                'The key was not saved by this endpoint. ' +
-                'The frontend must apply the returned files to the editor.'
+            provider,
+            model: model || null,
+            message: agentMessage,
+            files: execution.files,
+            nestedFiles: execution.nestedFiles,
+            changedFiles: execution.changedFiles,
+            deletedFiles: execution.deletedFiles,
+            results: execution.results
         });
 
     } catch (error) {
-        const status = error.response?.status || 500;
+        console.error(
+            'AI Coding Agent Error:',
+            error.message
+        );
 
-        const providerError =
-            error.response?.data?.error?.message ||
-            error.response?.data?.error ||
-            error.response?.data?.message ||
-            error.message ||
-            'AI Agent request failed.';
-
-        console.error('[AI AGENT ERROR]', {
-            status,
-            provider: req.body?.provider || 'unknown',
-            message: String(providerError).slice(0, 1000)
-        });
-
-        let userMessage = providerError;
-
-        if (status === 401 || status === 403) {
-            userMessage =
-                'API key authentication failed. Check your API key and provider account permissions.';
-        } else if (status === 429) {
-            userMessage =
-                'Your provider rate limit or quota has been reached. Check your provider billing and usage limits.';
-        } else if (status === 404) {
-            userMessage =
-                'The selected AI model or API endpoint was not found. Check the model name.';
-        } else if (status === 400) {
-            userMessage =
-                typeof providerError === 'string'
-                    ? providerError
-                    : 'The provider rejected the request. Check the model and request settings.';
-        } else if (status === 503 || status === 502 || status === 504) {
-            userMessage =
-                'The selected AI provider is temporarily unavailable. Please try again later.';
-        }
-
-        return res.status(status).json({
+        return res.status(500).json({
             success: false,
-            error: userMessage,
-            provider: req.body?.provider || 'unknown',
-            fallback: false,
-            billing: 'user_api_key'
+            error: error.message || 'AI Coding Agent request failed.'
         });
     }
 });
 
 // ============================================================
-// END AI CODING AGENT
+// FINAL EXPORT
 // ============================================================
 
 module.exports = app;
