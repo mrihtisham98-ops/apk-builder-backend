@@ -3,6 +3,9 @@ const cors = require('cors');
 const axios = require('axios');
 const crypto = require('crypto');
 const { applyAdMobIntegration } = require('../lib/admob-injector');
+// [NEW] R2 Integration ke liye AWS SDK imports
+const { S3Client, PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
+const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 
 const app = express();
 
@@ -130,7 +133,105 @@ function extractBase64Content(content) {
 }
 
 // ============================================================
-// APK BUILD ENDPOINT
+// [NEW] R2 SECURE UPLOAD URL GENERATOR
+// Ye endpoint frontend ko ek secure temporary link dega
+// ============================================================
+
+const r2Client = new S3Client({
+    region: 'auto',
+    endpoint: `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+    credentials: {
+        accessKeyId: process.env.R2_ACCESS_KEY_ID,
+        secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
+    },
+});
+
+app.post('/api/r2-upload-url', async (req, res) => {
+    try {
+        const { buildId } = req.body;
+        
+        if (!buildId) {
+            return res.status(400).json({ success: false, error: 'buildId is required' });
+        }
+
+        // File ka naam R2 mein kaisa hoga (e.g. uploads/1234-5678.zip)
+        const fileKey = `uploads/${buildId}.zip`;
+
+        // Ek temporary upload link banayein jo 10 minute tak valid ho
+        const command = new PutObjectCommand({
+            Bucket: process.env.R2_BUCKET_NAME,
+            Key: fileKey,
+            ContentType: 'application/zip',
+        });
+
+        const uploadUrl = await getSignedUrl(r2Client, command, { expiresIn: 600 });
+
+        return res.json({
+            success: true,
+            uploadUrl: uploadUrl,
+            fileKey: fileKey
+        });
+
+    } catch (error) {
+        console.error('R2 Upload URL Error:', error);
+        return res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+
+// ============================================================
+// [NEW] R2 UPLOAD COMPLETE & TRIGGER BUILD
+// Frontend upload complete hone ke baad ye chhoti request bhejega
+// ============================================================
+
+app.post('/api/r2-upload-complete', async (req, res) => {
+    try {
+        const { buildId, fileKey, appName, packageName, adMob } = req.body;
+
+        if (!buildId || !fileKey) {
+            return res.status(400).json({ success: false, error: 'buildId and fileKey are required' });
+        }
+
+        if (!GITHUB_TOKEN) {
+            return res.status(500).json({ success: false, error: 'GITHUB_TOKEN is not configured.' });
+        }
+
+        const config = {
+            buildId,
+            appName: String(appName || 'App').slice(0, 60),
+            packageName: packageName || 'com.example.app',
+            adMob: adMob || { enabled: false },
+            r2ZipKey: fileKey
+        };
+
+        // GitHub dispatch trigger karein
+        await github.post(`${API}/dispatches`, {
+            event_type: 'build_apk',
+            client_payload: {
+                buildId,
+                config,
+                source: 'r2'
+            }
+        });
+
+        return res.json({
+            success: true,
+            buildId,
+            message: 'APK build started successfully.'
+        });
+
+    } catch (error) {
+        console.error('R2 Complete Error:', error.response?.data || error.message);
+        return res.status(500).json({ 
+            success: false, 
+            error: error.response?.data?.message || error.message 
+        });
+    }
+});
+
+
+// ============================================================
+// APK BUILD ENDPOINT (Legacy - Direct files)
 // ============================================================
 
 app.post('/api/cloud-build-apk', async (req, res) => {
@@ -381,7 +482,8 @@ app.post('/api/cloud-build-apk', async (req, res) => {
 
         return res.status(statusCode).json(payload);
     }
-});  
+});
+
 // ============================================================
 // APK BUILD STATUS
 // ORIGINAL IMPLEMENTATION PRESERVED - NO CHANGES
