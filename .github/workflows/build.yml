@@ -1,4 +1,3 @@
-
 name: Build Real APK
 
 run-name: Build APK ${{ github.event.client_payload.buildId }}
@@ -493,6 +492,656 @@ jobs:
           print("App:", app_name)
           print("Package:", package_name)
           print("Custom icon enabled:", icon_enabled)
+          PY
+
+      # ============================================================
+      # OFFLINE DEPENDENCY BUNDLING SYSTEM (ADDED)
+      # Downloads external CSS / JS / fonts / icons / images
+      # referenced by HTML and CSS files, saves them locally in
+      # the APK assets, rewrites URLs to local relative paths, and
+      # writes offline-bundling-report.json.
+      # This step never fails the build on download errors — it
+      # only reports them.
+      # ============================================================
+      - name: Offline Dependency Bundling
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: |
+          set -uo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import re
+          import sys
+          import time
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+          from pathlib import Path
+
+          ASSETS = Path("myapp/app/src/main/assets")
+          REPORT_PATH = ASSETS / "offline-bundling-report.json"
+          LOCAL_VENDOR_DIR = ASSETS / "_offline_vendor"
+
+          DOWNLOAD_TIMEOUT = 30
+          MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024
+          MAX_RESOURCES = 500
+          USER_AGENT = (
+              "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36"
+          )
+
+          # Mime -> extension fallback when URL has no usable suffix.
+          MIME_EXT = {
+              "text/css": ".css",
+              "text/javascript": ".js",
+              "application/javascript": ".js",
+              "application/x-javascript": ".js",
+              "image/png": ".png",
+              "image/jpeg": ".jpg",
+              "image/jpg": ".jpg",
+              "image/gif": ".gif",
+              "image/svg+xml": ".svg",
+              "image/webp": ".webp",
+              "image/x-icon": ".ico",
+              "image/vnd.microsoft.icon": ".ico",
+              "image/avif": ".avif",
+              "font/woff": ".woff",
+              "font/woff2": ".woff2",
+              "application/font-woff": ".woff",
+              "application/font-woff2": ".woff2",
+              "font/ttf": ".ttf",
+              "application/x-font-ttf": ".ttf",
+              "font/otf": ".otf",
+              "application/vnd.ms-fontobject": ".eot",
+              "video/mp4": ".mp4",
+              "video/webm": ".webm",
+              "application/json": ".json",
+          }
+
+          SAFE_EXT_RE = re.compile(r"^\.[A-Za-z0-9]{1,8}$")
+
+          downloaded = []
+          failed = []
+          unsupported = []
+          already_local = []
+          url_cache = {}
+
+          total_downloaded_bytes = 0
+
+          print("========== OFFLINE BUNDLING START ==========")
+
+          if not ASSETS.is_dir():
+              print("Assets directory not found — skipping bundling.")
+              raise SystemExit(0)
+
+          ASSETS.mkdir(parents=True, exist_ok=True)
+          LOCAL_VENDOR_DIR.mkdir(parents=True, exist_ok=True)
+
+          def safe_ext_from_url(url):
+              try:
+                  path = urllib.parse.urlparse(url).path
+              except Exception:
+                  return ""
+              suffix = Path(path).suffix.lower()
+              if suffix and SAFE_EXT_RE.match(suffix):
+                  return suffix
+              return ""
+
+          def guess_ext(url, content_type):
+              ext = safe_ext_from_url(url)
+              if ext:
+                  return ext
+              if content_type:
+                  base = content_type.split(";", 1)[0].strip().lower()
+                  if base in MIME_EXT:
+                      return MIME_EXT[base]
+              return ".bin"
+
+          def is_external(url):
+              if not url:
+                  return False
+              u = url.strip()
+              if not u:
+                  return False
+              low = u.lower()
+              if low.startswith("data:") or low.startswith("blob:"):
+                  return False
+              if low.startswith("javascript:") or low.startswith("mailto:"):
+                  return False
+              if low.startswith("#"):
+                  return False
+              if low.startswith("//"):
+                  return True
+              if low.startswith("http://") or low.startswith("https://"):
+                  return True
+              return False
+
+          def normalize_url(url, base_url):
+              if url.startswith("//"):
+                  if base_url and base_url.startswith("http://"):
+                      url = "http://" + url[2:]
+                  else:
+                      url = "https://" + url[2:]
+              try:
+                  return urllib.parse.urljoin(base_url, url)
+              except Exception:
+                  return url
+
+          def download_resource(url, referer=None):
+              """Return (bytes, content_type) or (None, error_string)."""
+              if url in url_cache:
+                  return url_cache[url]
+
+              headers = {
+                  "User-Agent": USER_AGENT,
+                  "Accept": "*/*",
+              }
+              if referer:
+                  headers["Referer"] = referer
+
+              request = urllib.request.Request(url, headers=headers)
+              try:
+                  with urllib.request.urlopen(
+                      request, timeout=DOWNLOAD_TIMEOUT
+                  ) as response:
+                      content_type = response.headers.get("Content-Type", "")
+                      chunks = []
+                      total = 0
+                      while True:
+                          chunk = response.read(65536)
+                          if not chunk:
+                              break
+                          total += len(chunk)
+                          if total > MAX_DOWNLOAD_BYTES:
+                              url_cache[url] = (
+                                  None,
+                                  "exceeds max download size"
+                              )
+                              return url_cache[url]
+                          chunks.append(chunk)
+                      data = b"".join(chunks)
+                      if not data:
+                          url_cache[url] = (None, "empty response")
+                          return url_cache[url]
+                      url_cache[url] = (data, content_type)
+                      return url_cache[url]
+              except urllib.error.HTTPError as e:
+                  url_cache[url] = (None, "HTTP " + str(e.code))
+                  return url_cache[url]
+              except urllib.error.URLError as e:
+                  url_cache[url] = (
+                      None,
+                      "URL error: " + str(e.reason)
+                  )
+                  return url_cache[url]
+              except Exception as e:
+                  url_cache[url] = (
+                      None,
+                      "Download error: " + str(e)
+                  )
+                  return url_cache[url]
+
+          def local_filename_for_url(url, content_type):
+              """Deterministic, collision-free local filename."""
+              parsed = urllib.parse.urlparse(url)
+              stem = Path(parsed.path).stem or "resource"
+              stem = re.sub(r"[^A-Za-z0-9._-]+", "_", stem)[:40]
+              if not stem:
+                  stem = "resource"
+              ext = guess_ext(url, content_type)
+              digest = hashlib.sha1(
+                  url.encode("utf-8")
+              ).hexdigest()[:10]
+              return stem + "_" + digest + ext
+
+          def rewrite_url_to_local(original, local_filename, base_url):
+              """Compute a browser-relative path from the referencing
+              file's folder (base_url is the folder of the referrer,
+              not a URL). Returns a relative string using forward slashes."""
+              # base_url here is the *file path* of the referrer.
+              # We compute relative path from its parent to the local file.
+              base_dir = Path(base_url).parent if base_url else Path(".")
+              try:
+                  rel = os.path.relpath(
+                      LOCAL_VENDOR_DIR / local_filename,
+                      base_dir
+                  ).replace(os.sep, "/")
+              except Exception:
+                  rel = "_offline_vendor/" + local_filename
+              return rel
+
+          def fetch_and_store(url, referer_file, base_url_for_join):
+              """Download URL, save to vendor dir, return local filename."""
+              nonlocal total_downloaded_bytes
+              if len(downloaded) >= MAX_RESOURCES:
+                  return None
+              data, extra = download_resource(url, referer=referer_file)
+              if data is None:
+                  failed.append({
+                      "url": url,
+                      "reason": extra,
+                      "referer": str(referer_file),
+                  })
+                  return None
+              content_type = extra
+              filename = local_filename_for_url(url, content_type)
+              target = LOCAL_VENDOR_DIR / filename
+              if not target.is_file() or target.stat().st_size == 0:
+                  try:
+                      target.write_bytes(data)
+                  except Exception as e:
+                      failed.append({
+                          "url": url,
+                          "reason": "write failed: " + str(e),
+                          "referer": str(referer_file),
+                      })
+                      return None
+                  total_downloaded_bytes += len(data)
+              entry = {
+                  "url": url,
+                  "local_path": str(target.relative_to(ASSETS)),
+                  "bytes": len(data),
+                  "content_type": content_type,
+                  "referer": str(referer_file),
+              }
+              # De-duplicate by URL
+              if not any(d["url"] == url for d in downloaded):
+                  downloaded.append(entry)
+              return filename
+
+          # ============================================================
+          # HTML scanning
+          # ============================================================
+          ATTR_NAMES_FOR_URLS = {
+              "src", "href", "poster", "data", "background", "icon",
+          }
+
+          SRC_WITHOUT_DOWNLOAD = {
+              "iframe", "frame", "object", "embed", "track",
+          }
+
+          SCRIPT_MODULE_RE = re.compile(
+              r'<script[^>]*\btype\s*=\s*["\']module["\']',
+              re.IGNORECASE,
+          )
+          DYNAMIC_IMPORT_RE = re.compile(
+              r'\bimport\s*\(\s*[\'"`]', re.IGNORECASE
+          )
+          FETCH_RE = re.compile(
+              r'\b(fetch|axios\.(get|post)|XMLHttpRequest)\s*\(', re.IGNORECASE
+          )
+
+          # Lightweight HTML attribute regex — not a full parser, but
+          # sufficient for static attribute scanning of common tags.
+          HTML_URL_ATTR_RE = re.compile(
+              r"""(?P<attr>\b(?:src|href|poster|data|background|icon))\s*=\s*"""
+              r"""(?:"(?P<dq>[^"]*)"|'(?P<sq>[^']*)'|(?P<bare>[^\s>]+))""",
+              re.IGNORECASE,
+          )
+
+          SRCSET_RE = re.compile(
+              r"""\bsrcset\s*=\s*(?:"(?P<dq>[^"]*)"|'(?P<sq>[^']*)')""",
+              re.IGNORECASE,
+          )
+
+          STYLE_BLOCK_RE = re.compile(
+              r"<style\b[^>]*>(?P<css>.*?)</style>",
+              re.DOTALL | re.IGNORECASE,
+          )
+
+          INLINE_STYLE_RE = re.compile(
+              r"""\bstyle\s*=\s*(?:"(?P<dq>[^"]*)"|'(?P<sq>[^']*)')""",
+              re.IGNORECASE,
+          )
+
+          CSS_URL_RE = re.compile(
+              r"""url\(\s*(?:"(?P<dq>[^"\)]*)"|'(?P<sq>[^'\)]*)'|(?P<bare>[^\)"'\s]+))\s*\)""",
+              re.IGNORECASE,
+          )
+
+          CSS_IMPORT_RE = re.compile(
+              r"""@import\s+(?:url\(\s*)?(?:"(?P<dq>[^"]*)"|'(?P<sq>[^']*)'|(?P<bare>[^\s\)'";]+))""",
+              re.IGNORECASE,
+          )
+
+          def extract_srcset_urls(value):
+              urls = []
+              for part in value.split(","):
+                  part = part.strip()
+                  if not part:
+                      continue
+                  pieces = part.split()
+                  if not pieces:
+                      continue
+                  urls.append(pieces[0])
+              return urls
+
+          def resolve_local_path_for_rewrite(asset_file):
+              """Return a path string used by os.path.relpath — must be
+              absolute or rooted at CWD consistently. We use the path
+              relative to CWD so relpath math is stable."""
+              return Path(os.path.relpath(asset_file, Path(".")))
+
+          def process_css_text(css_text, css_file_path, referer_url):
+              """Rewrite CSS url()/@import to local paths, download targets.
+              Returns new CSS text and list of newly created css files to
+              process recursively."""
+              new_css = css_text
+              new_css_files_to_visit = []
+
+              # @import first (before url()) so we can capture the CSS file.
+              def import_repl(match):
+                  raw = (
+                      match.group("dq")
+                      or match.group("sq")
+                      or match.group("bare")
+                  )
+                  if not raw or not is_external(raw):
+                      return match.group(0)
+                  absolute = normalize_url(raw, referer_url)
+                  local = fetch_and_store(
+                      absolute,
+                      referer_file=css_file_path,
+                      base_url_for_join=referer_url,
+                  )
+                  if not local:
+                      return match.group(0)
+                  new_css_files_to_visit.append(LOCAL_VENDOR_DIR / local)
+                  return "@import url(\"{}\")".format(
+                      rewrite_url_to_local(
+                          raw, local, str(css_file_path)
+                      )
+                  )
+
+              new_css = CSS_IMPORT_RE.sub(import_repl, new_css)
+
+              def url_repl(match):
+                  raw = (
+                      match.group("dq")
+                      or match.group("sq")
+                      or match.group("bare")
+                  )
+                  if not raw or not is_external(raw):
+                      return match.group(0)
+                  absolute = normalize_url(raw, referer_url)
+                  local = fetch_and_store(
+                      absolute,
+                      referer_file=css_file_path,
+                      base_url_for_join=referer_url,
+                  )
+                  if not local:
+                      return match.group(0)
+                  return "url(\"{}\")".format(
+                      rewrite_url_to_local(
+                          raw, local, str(css_file_path)
+                      )
+                  )
+
+              new_css = CSS_URL_RE.sub(url_repl, new_css)
+              return new_css, new_css_files_to_visit
+
+          def process_html_file(html_file):
+              try:
+                  original = html_file.read_text(encoding="utf-8")
+              except UnicodeDecodeError:
+                  try:
+                      original = html_file.read_text(
+                          encoding="latin-1"
+                      )
+                  except Exception:
+                      return
+              except Exception:
+                  return
+
+              html_dir = html_file.parent
+              base_url = None  # No document base URL — only absolute URLs.
+
+              new_html = original
+
+              # Detect unsupported patterns for the report.
+              if SCRIPT_MODULE_RE.search(original):
+                  unsupported.append({
+                      "file": str(html_file.relative_to(ASSETS)),
+                      "reason": "ES module <script type=\"module\">",
+                      "note": "Static bundler cannot resolve module imports.",
+                  })
+              if DYNAMIC_IMPORT_RE.search(original):
+                  unsupported.append({
+                      "file": str(html_file.relative_to(ASSETS)),
+                      "reason": "dynamic import() detected",
+                      "note": "Runtime module resolution is unsupported.",
+                  })
+              if FETCH_RE.search(original):
+                  unsupported.append({
+                      "file": str(html_file.relative_to(ASSETS)),
+                      "reason": "runtime fetch/axios/XHR detected",
+                      "note": "Runtime network calls cannot be bundled.",
+                  })
+
+              # --- srcset handling -------------------------------------
+              def srcset_repl(match):
+                  value = match.group("dq") or match.group("sq") or ""
+                  parts_out = []
+                  changed = False
+                  for part in value.split(","):
+                      part_stripped = part.strip()
+                      if not part_stripped:
+                          continue
+                      pieces = part_stripped.split()
+                      if not pieces:
+                          continue
+                      candidate = pieces[0]
+                      if is_external(candidate):
+                          absolute = normalize_url(candidate, "")
+                          local = fetch_and_store(
+                              absolute,
+                              referer_file=html_file,
+                              base_url_for_join="",
+                          )
+                          if local:
+                              pieces[0] = rewrite_url_to_local(
+                                  candidate, local, str(html_file)
+                              )
+                              changed = True
+                      parts_out.append(" ".join(pieces))
+                  if not changed:
+                      return match.group(0)
+                  quote = '"' if match.group("dq") is not None else "'"
+                  return "srcset=" + quote + ", ".join(parts_out) + quote
+
+              new_html = SRCSET_RE.sub(srcset_repl, new_html)
+
+              # --- HTML attribute URL handling --------------------------
+              def attr_repl(match):
+                  attr = match.group("attr")
+                  raw = (
+                      match.group("dq")
+                      if match.group("dq") is not None
+                      else (
+                          match.group("sq")
+                          if match.group("sq") is not None
+                          else match.group("bare")
+                      )
+                  )
+                  if not raw or not is_external(raw):
+                      return match.group(0)
+                  # Skip non-downloaded resources like iframe src.
+                  absolute = normalize_url(raw, "")
+                  local = fetch_and_store(
+                      absolute,
+                      referer_file=html_file,
+                      base_url_for_join="",
+                  )
+                  if not local:
+                      return match.group(0)
+                  rewritten = rewrite_url_to_local(
+                      raw, local, str(html_file)
+                  )
+                  quote = '"'
+                  return '{}="{}"'.format(attr, rewritten)
+
+              new_html = HTML_URL_ATTR_RE.sub(attr_repl, new_html)
+
+              # --- <style> blocks --------------------------------------
+              def style_block_repl(match):
+                  css = match.group("css")
+                  new_css, _nested = process_css_text(
+                      css, html_file, ""
+                  )
+                  return "<style>" + new_css + "</style>"
+
+              new_html = STYLE_BLOCK_RE.sub(
+                  style_block_repl, new_html
+              )
+
+              # --- inline style="..." attributes -----------------------
+              def inline_style_repl(match):
+                  css = match.group("dq")
+                  if css is None:
+                      css = match.group("sq") or ""
+                  new_css, _nested = process_css_text(
+                      css, html_file, ""
+                  )
+                  quote = '"' if match.group("dq") is not None else "'"
+                  return "style=" + quote + new_css + quote
+
+              new_html = INLINE_STYLE_RE.sub(
+                  inline_style_repl, new_html
+              )
+
+              if new_html != original:
+                  try:
+                      html_file.write_text(new_html, encoding="utf-8")
+                  except Exception:
+                      pass
+
+          def process_css_file(css_file, visited):
+              if css_file in visited:
+                  return
+              visited.add(css_file)
+              try:
+                  original = css_file.read_text(encoding="utf-8")
+              except UnicodeDecodeError:
+                  try:
+                      original = css_file.read_text(
+                          encoding="latin-1"
+                      )
+                  except Exception:
+                      return
+              except Exception:
+                  return
+
+              referer_url = ""
+              new_css, nested = process_css_text(
+                  original, css_file, referer_url
+              )
+              if new_css != original:
+                  try:
+                      css_file.write_text(new_css, encoding="utf-8")
+                  except Exception:
+                      pass
+
+              # Recurse into downloaded CSS files (they live in
+              # LOCAL_VENDOR_DIR and will be re-scanned as new CSS).
+              for child in nested:
+                  if child.is_file():
+                      process_css_file(child, visited)
+
+          # ============================================================
+          # Walk all HTML and CSS files under assets (excluding vendor
+          # dir the first pass; vendor CSS is handled by recursion).
+          # ============================================================
+          html_files = sorted(ASSETS.rglob("*.html"))
+          css_files = sorted(ASSETS.rglob("*.css"))
+
+          for html_file in html_files:
+              try:
+                  rel = html_file.relative_to(ASSETS)
+              except ValueError:
+                  continue
+              if rel.parts and rel.parts[0] == "_offline_vendor":
+                  continue
+              try:
+                  process_html_file(html_file)
+              except Exception as e:
+                  failed.append({
+                      "url": str(html_file),
+                      "reason": "html processing error: " + str(e),
+                      "referer": "",
+                  })
+
+          visited_css = set()
+          for css_file in css_files:
+              try:
+                  rel = css_file.relative_to(ASSETS)
+              except ValueError:
+                  continue
+              if rel.parts and rel.parts[0] == "_offline_vendor":
+                  continue
+              try:
+                  process_css_file(css_file, visited_css)
+              except Exception as e:
+                  failed.append({
+                      "url": str(css_file),
+                      "reason": "css processing error: " + str(e),
+                      "referer": "",
+                  })
+
+          # Recursive pass on newly downloaded CSS files that weren't
+          # yet processed.
+          for entry in list(downloaded):
+              if entry.get("content_type", "").lower().startswith(
+                  "text/css"
+              ):
+                  child = ASSETS / entry["local_path"]
+                  if child.is_file() and child not in visited_css:
+                      process_css_file(child, visited_css)
+
+          # ============================================================
+          # Write the report
+          # ============================================================
+          report = {
+              "generated_at": time.strftime(
+                  "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+              ),
+              "total_downloaded": len(downloaded),
+              "total_failed": len(failed),
+              "total_unsupported": len(unsupported),
+              "total_downloaded_bytes": total_downloaded_bytes,
+              "total_downloaded_size_mb": round(
+                  total_downloaded_bytes / (1024 * 1024), 3
+              ),
+              "downloaded_resources": downloaded,
+              "failed_resources": failed,
+              "unsupported_resources": unsupported,
+              "vendor_directory": str(
+                  LOCAL_VENDOR_DIR.relative_to(ASSETS)
+              ),
+          }
+
+          try:
+              REPORT_PATH.write_text(
+                  json.dumps(report, indent=2, ensure_ascii=False),
+                  encoding="utf-8",
+              )
+          except Exception as e:
+              print("WARNING: could not write report:", e)
+
+          print("========== OFFLINE BUNDLING REPORT ==========")
+          print("Downloaded:", len(downloaded))
+          print("Failed:", len(failed))
+          print("Unsupported:", len(unsupported))
+          print("Total bytes:", total_downloaded_bytes)
+          print("Report:", REPORT_PATH)
+          for d in downloaded[:30]:
+              print("DOWNLOADED:", d["url"], "->", d["local_path"])
+          for f in failed[:30]:
+              print("FAILED:", f["url"], "->", f["reason"])
+          for u in unsupported[:20]:
+              print("UNSUPPORTED:", u["file"], "-", u["reason"])
+          print("========== OFFLINE BUNDLING END ==========")
           PY
 
       - name: Create Gradle Project
