@@ -68,6 +68,7 @@ async function createBlob(content, encoding = 'utf-8') {
 
 // ============================================================
 // APK BUILD ENDPOINT
+// ORIGINAL IMPLEMENTATION PRESERVED
 // ============================================================
 
 app.post('/api/cloud-build-apk', async (req, res) => {
@@ -277,6 +278,7 @@ app.post('/api/cloud-build-apk', async (req, res) => {
 
 // ============================================================
 // APK BUILD STATUS
+// ORIGINAL IMPLEMENTATION PRESERVED
 // ============================================================
 
 app.get('/api/build-status/:buildId', async (req, res) => {
@@ -359,7 +361,7 @@ app.get('/api/build-status/:buildId', async (req, res) => {
 
 // ============================================================
 // GROQ CHAT ENDPOINT
-// Existing server-key endpoint preserved.
+// EXISTING SERVER-KEY ENDPOINT PRESERVED
 // ============================================================
 
 app.post('/api/ai-chat', async (req, res) => {
@@ -424,7 +426,7 @@ app.post('/api/ai-chat', async (req, res) => {
 
 // ============================================================
 // OPENAI CHAT ENDPOINT
-// Existing server-key endpoint preserved.
+// EXISTING SERVER-KEY ENDPOINT PRESERVED
 // ============================================================
 
 app.post('/api/openai-chat', async (req, res) => {
@@ -536,7 +538,7 @@ app.post('/api/openai-chat', async (req, res) => {
 
 // ============================================================
 // GEMINI CHAT ENDPOINT WITH GROQ FALLBACK
-// Existing server-key endpoint preserved.
+// EXISTING SERVER-KEY ENDPOINT PRESERVED
 // ============================================================
 
 app.post('/api/gemini-chat', async (req, res) => {
@@ -856,6 +858,422 @@ app.post('/api/gemini-chat', async (req, res) => {
 });
 
 // ============================================================
+// MULTI-PROVIDER BYOK SYSTEM
+// OpenAI + Groq + Gemini + DeepSeek
+// User supplies their own API key.
+// No automatic provider fallback.
+// ============================================================
+
+const BYOK_PROVIDERS = {
+    openai: {
+        label: 'OpenAI',
+        endpoint: 'https://api.openai.com/v1/chat/completions',
+        models: [
+            'gpt-6-luna',
+            'gpt-5.4-mini',
+            'gpt-4.1-mini'
+        ],
+        defaultModel: 'gpt-5.4-mini'
+    },
+
+    groq: {
+        label: 'Groq',
+        endpoint: 'https://api.groq.com/openai/v1/chat/completions',
+        models: [
+            'openai/gpt-oss-120b',
+            'openai/gpt-oss-20b',
+            'llama-3.3-70b-versatile'
+        ],
+        defaultModel: 'openai/gpt-oss-120b'
+    },
+
+    gemini: {
+        label: 'Google Gemini',
+        endpoint: 'https://generativelanguage.googleapis.com/v1beta/models/',
+        models: [
+            'gemini-2.5-flash',
+            'gemini-2.5-pro'
+        ],
+        defaultModel: 'gemini-2.5-flash'
+    },
+
+    deepseek: {
+        label: 'DeepSeek',
+        endpoint: 'https://api.deepseek.com/chat/completions',
+        models: [
+            'deepseek-flash',
+            'deepseek-v4-pro'
+        ],
+        defaultModel: 'deepseek-flash'
+    }
+};
+
+// Validate user-supplied API key.
+function byokValidateKey(apiKey) {
+    if (
+        typeof apiKey !== 'string' ||
+        !apiKey.trim() ||
+        apiKey.length > 512 ||
+        /[\r\n]/.test(apiKey)
+    ) {
+        throw new Error('A valid API key is required.');
+    }
+
+    return apiKey.trim();
+}
+
+// Validate and normalize chat messages.
+function byokNormalizeMessages(messages) {
+    if (!Array.isArray(messages) || messages.length === 0) {
+        throw new Error('Messages are required.');
+    }
+
+    if (messages.length > 40) {
+        throw new Error('Maximum 40 messages are allowed.');
+    }
+
+    return messages.map(message => {
+        if (
+            !message ||
+            typeof message.content !== 'string' ||
+            !['system', 'developer', 'user', 'assistant'].includes(message.role)
+        ) {
+            throw new Error('Invalid message format.');
+        }
+
+        if (message.content.length > 30000) {
+            throw new Error('A message is too large.');
+        }
+
+        return {
+            role: message.role,
+            content: message.content
+        };
+    });
+}
+
+// Create Gemini request body.
+function byokBuildGeminiBody(messages, maxTokens, temperature) {
+    const systemMessages = [];
+    const contents = [];
+
+    for (const message of messages) {
+        if (
+            message.role === 'system' ||
+            message.role === 'developer'
+        ) {
+            systemMessages.push(message.content);
+            continue;
+        }
+
+        contents.push({
+            role: message.role === 'assistant' ? 'model' : 'user',
+            parts: [{ text: message.content }]
+        });
+    }
+
+    const body = {
+        contents,
+        generationConfig: {
+            maxOutputTokens: maxTokens || 4096,
+            temperature: temperature ?? 0.7
+        }
+    };
+
+    if (systemMessages.length) {
+        body.systemInstruction = {
+            parts: [{ text: systemMessages.join('\n\n') }]
+        };
+    }
+
+    return body;
+}
+
+// Call one selected BYOK provider.
+async function byokCallProvider(providerKey, apiKey, model, messages, options = {}) {
+    const provider = BYOK_PROVIDERS[providerKey];
+
+    if (!provider) {
+        throw new Error('Unsupported AI provider.');
+    }
+
+    const key = byokValidateKey(apiKey);
+    const selectedModel = String(model || provider.defaultModel).trim();
+
+    if (
+        !selectedModel ||
+        selectedModel.length > 150 ||
+        !/^[a-zA-Z0-9._:/-]+$/.test(selectedModel)
+    ) {
+        throw new Error('Invalid model name.');
+    }
+
+    const maxTokens = Math.min(
+        Math.max(Number(options.maxTokens) || 4096, 1),
+        16384
+    );
+
+    const temperature =
+        typeof options.temperature === 'number'
+            ? Math.max(0, Math.min(2, options.temperature))
+            : 0.7;
+
+    let url;
+    let body;
+    let headers;
+
+    if (providerKey === 'gemini') {
+        url = `${provider.endpoint}${encodeURIComponent(selectedModel)}:generateContent`;
+
+        body = byokBuildGeminiBody(
+            messages,
+            maxTokens,
+            temperature
+        );
+
+        headers = {
+            'Content-Type': 'application/json',
+            'x-goog-api-key': key
+        };
+
+    } else {
+        url = provider.endpoint;
+
+        body = {
+            model: selectedModel,
+            messages,
+            max_tokens: maxTokens,
+            temperature
+        };
+
+        if (providerKey === 'openai') {
+            delete body.max_tokens;
+            body.max_completion_tokens = maxTokens;
+        }
+
+        if (providerKey === 'deepseek') {
+            body.stream = false;
+        }
+
+        headers = {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${key}`
+        };
+    }
+
+    const response = await axios.post(
+        url,
+        body,
+        {
+            headers,
+            timeout: 120000
+        }
+    );
+
+    let content = '';
+    let usage = response.data?.usage || null;
+
+    if (providerKey === 'gemini') {
+        content = response.data?.candidates?.[0]?.content?.parts
+            ?.map(part => part.text || '')
+            .join('') || '';
+
+        usage = response.data?.usageMetadata || null;
+    } else {
+        content =
+            response.data?.choices?.[0]?.message?.content || '';
+    }
+
+    if (typeof content !== 'string' || !content.trim()) {
+        throw new Error(`${provider.label} returned an empty response.`);
+    }
+
+    return {
+        content,
+        provider: providerKey,
+        model: response.data?.model ||
+            response.data?.modelVersion ||
+            selectedModel,
+        usage
+    };
+}
+
+// Convert provider errors into readable messages.
+function byokGetError(error, providerKey) {
+    const status = error.response?.status || error.status || 502;
+
+    const provider = BYOK_PROVIDERS[providerKey];
+    const label = provider?.label || providerKey;
+
+    const original =
+        error.response?.data?.error?.message ||
+        error.response?.data?.error?.status ||
+        error.response?.data?.message ||
+        error.message ||
+        'AI request failed.';
+
+    let message = String(original);
+
+    if (status === 401) {
+        message = `Invalid ${label} API key. Please check your key.`;
+    } else if (status === 403) {
+        message = `${label} access forbidden. Check API permissions and billing.`;
+    } else if (status === 404) {
+        message = `Model or endpoint not found for ${label}. Check your model name.`;
+    } else if (status === 429) {
+        message = `${label} rate limit or quota exceeded. Check your API usage and billing.`;
+    } else if ([500, 502, 503, 504].includes(status)) {
+        message = `${label} is temporarily unavailable. Please try again later.`;
+    } else if (status === 408) {
+        message = `${label} request timed out.`;
+    }
+
+    return { status, message };
+}
+
+// ============================================================
+// BYOK CHAT ENDPOINT
+// POST /api/ai/providers/:provider/chat
+// ============================================================
+
+app.post('/api/ai/providers/:provider/chat', async (req, res) => {
+    const providerKey = String(req.params.provider || '').toLowerCase();
+
+    try {
+        if (!BYOK_PROVIDERS[providerKey]) {
+            return res.status(400).json({
+                success: false,
+                error: 'Unsupported AI provider.',
+                provider: providerKey
+            });
+        }
+
+        const {
+            apiKey,
+            model,
+            messages,
+            temperature,
+            maxTokens
+        } = req.body || {};
+
+        const normalized = byokNormalizeMessages(messages);
+
+        const result = await byokCallProvider(
+            providerKey,
+            apiKey,
+            model,
+            normalized,
+            { temperature, maxTokens }
+        );
+
+        return res.json({
+            success: true,
+            provider: result.provider,
+            model: result.model,
+            content: result.content,
+            usage: result.usage,
+            fallback: false,
+            billing: 'user_api_key'
+        });
+
+    } catch (error) {
+        const result = byokGetError(error, providerKey);
+
+        console.error('[BYOK CHAT ERROR]', {
+            provider: providerKey,
+            status: result.status,
+            message: result.message.slice(0, 500)
+        });
+
+        return res.status(result.status).json({
+            success: false,
+            error: result.message,
+            provider: providerKey,
+            fallback: false,
+            billing: 'user_api_key'
+        });
+    }
+});
+
+// ============================================================
+// BYOK API KEY + MODEL TEST ENDPOINT
+// POST /api/ai/providers/:provider/test
+// ============================================================
+
+app.post('/api/ai/providers/:provider/test', async (req, res) => {
+    const providerKey = String(req.params.provider || '').toLowerCase();
+
+    try {
+        if (!BYOK_PROVIDERS[providerKey]) {
+            return res.status(400).json({
+                success: false,
+                error: 'Unsupported AI provider.'
+            });
+        }
+
+        const { apiKey, model } = req.body || {};
+
+        const provider = BYOK_PROVIDERS[providerKey];
+
+        const result = await byokCallProvider(
+            providerKey,
+            apiKey,
+            model || provider.defaultModel,
+            [{
+                role: 'user',
+                content: 'Reply with exactly: OK'
+            }],
+            {
+                temperature: 0,
+                maxTokens: 16
+            }
+        );
+
+        return res.json({
+            success: true,
+            message: 'API connection successful.',
+            provider: providerKey,
+            model: result.model
+        });
+
+    } catch (error) {
+        const result = byokGetError(error, providerKey);
+
+        console.error('[BYOK TEST ERROR]', {
+            provider: providerKey,
+            status: result.status,
+            message: result.message.slice(0, 500)
+        });
+
+        return res.status(result.status).json({
+            success: false,
+            error: result.message,
+            provider: providerKey
+        });
+    }
+});
+
+// ============================================================
+// PROVIDER + MODEL LIST
+// GET /api/ai/providers
+// No API keys are returned.
+// ============================================================
+
+app.get('/api/ai/providers', (req, res) => {
+    const providers = Object.entries(BYOK_PROVIDERS).map(([id, provider]) => ({
+        id,
+        label: provider.label,
+        models: provider.models,
+        defaultModel: provider.defaultModel
+    }));
+
+    return res.json({
+        success: true,
+        providers
+    });
+});
+
+// ============================================================
 // WEB APP STUDIO - AI CODING AGENT
 // BYOK: USER SUPPLIES THEIR OWN API KEY
 // ============================================================
@@ -984,8 +1402,6 @@ function agentParseJSON(text) {
 
 // ============================================================
 // USER API KEY VALIDATION
-// The key is used only for this request.
-// It is not saved in environment variables or a database.
 // ============================================================
 
 function agentValidateApiKey(apiKey) {
@@ -1012,7 +1428,7 @@ function agentValidateApiKey(apiKey) {
 
 // ============================================================
 // CALL SELECTED PROVIDER USING THE USER'S OWN API KEY
-// No server API key fallback is allowed in BYOK mode.
+// OpenAI + Groq + Gemini + DeepSeek
 // ============================================================
 
 async function agentCallProvider(provider, messages, userApiKey, customModel) {
@@ -1020,168 +1436,31 @@ async function agentCallProvider(provider, messages, userApiKey, customModel) {
         throw new Error('Your API key is missing. Please connect your API key.');
     }
 
-    if (provider === 'openai') {
-        const model = (
-            customModel ||
-            process.env.OPENAI_MODEL ||
-            'gpt-6-luna'
-        ).trim();
+    const selectedModel =
+        customModel ||
+        BYOK_PROVIDERS[provider]?.defaultModel;
 
-        const response = await axios.post(
-            'https://api.openai.com/v1/chat/completions',
-            {
-                model,
-                messages,
-                max_completion_tokens: 8192
-            },
-            {
-                headers: {
-                    'Content-Type': 'application/json',
-                    Authorization: `Bearer ${userApiKey}`
-                },
-                timeout: 120000
-            }
-        );
-
-        const answer = response.data?.choices?.[0]?.message?.content;
-
-        if (!answer) {
-            throw new Error('OpenAI returned an empty response.');
-        }
-
-        return {
-            text: answer,
-            provider: 'openai',
-            model: response.data.model || model,
-            fallback: false
-        };
+    if (!selectedModel) {
+        throw new Error('Unsupported AI provider or missing model.');
     }
 
-    if (provider === 'groq') {
-        const model = (
-            customModel || 'openai/gpt-oss-120b'
-        ).trim();
-
-        const response = await axios.post(
-            'https://api.groq.com/openai/v1/chat/completions',
-            {
-                model,
-                messages,
-                temperature: 0.2,
-                max_tokens: 8192
-            },
-            {
-                headers: {
-                    'Content-Type': 'application/json',
-                    Authorization: `Bearer ${userApiKey}`
-                },
-                timeout: 120000
-            }
-        );
-
-        const answer = response.data?.choices?.[0]?.message?.content;
-
-        if (!answer) {
-            throw new Error('Groq returned an empty response.');
+    const result = await byokCallProvider(
+        provider,
+        userApiKey,
+        selectedModel,
+        messages,
+        {
+            temperature: 0.2,
+            maxTokens: 8192
         }
+    );
 
-        return {
-            text: answer,
-            provider: 'groq',
-            model: response.data.model || model,
-            fallback: false
-        };
-    }
-
-    if (provider === 'gemini') {
-        const model = (
-            customModel ||
-            process.env.GEMINI_MODEL ||
-            'gemini-3.8-flash'
-        ).trim().replace(/^models\//, '');
-
-        const systemMessages = [];
-        const input = [];
-
-        for (const message of messages) {
-            if (
-                message.role === 'system' ||
-                message.role === 'developer'
-            ) {
-                systemMessages.push(message.content);
-            } else {
-                input.push({
-                    type: message.role === 'assistant'
-                        ? 'model_output'
-                        : 'user_input',
-                    content: [{
-                        type: 'text',
-                        text: message.content
-                    }]
-                });
-            }
-        }
-
-        if (input.length === 0) {
-            throw new Error(
-                'At least one user or assistant message is required.'
-            );
-        }
-
-        const requestBody = {
-            model,
-            input,
-            store: false
-        };
-
-        if (systemMessages.length) {
-            requestBody.system_instruction =
-                systemMessages.join('\n\n');
-        }
-
-        const response = await axios.post(
-            'https://generativelanguage.googleapis.com/v1beta/interactions',
-            requestBody,
-            {
-                headers: {
-                    'Content-Type': 'application/json',
-                    'x-goog-api-key': userApiKey
-                },
-                timeout: 120000
-            }
-        );
-
-        const data = response.data || {};
-
-        let answer = data.output_text || '';
-
-        if (!answer && Array.isArray(data.steps)) {
-            answer = data.steps
-                .filter(step => step.type === 'model_output')
-                .flatMap(step =>
-                    Array.isArray(step.content) ? step.content : []
-                )
-                .filter(part =>
-                    part.type === 'text' &&
-                    typeof part.text === 'string'
-                )
-                .map(part => part.text)
-                .join('');
-        }
-
-        if (!answer) {
-            throw new Error('Gemini returned an empty response.');
-        }
-
-        return {
-            text: answer,
-            provider: 'gemini',
-            model: data.model || model,
-            fallback: false
-        };
-    }
-
-    throw new Error('Unsupported AI provider.');
+    return {
+        text: result.content,
+        provider: result.provider,
+        model: result.model,
+        fallback: false
+    };
 }
 
 // Execute AI file actions in a virtual project.
@@ -1353,15 +1632,13 @@ app.post('/api/ai-agent', async (req, res) => {
             files: submittedFiles
         } = req.body || {};
 
-        if (!['openai', 'groq', 'gemini'].includes(provider)) {
+        if (!['openai', 'groq', 'gemini', 'deepseek'].includes(provider)) {
             return res.status(400).json({
                 success: false,
                 error: 'Invalid AI provider.'
             });
         }
 
-        // Require the user's own API key.
-        // Do not silently use the platform's server key.
         let userApiKey;
 
         try {
@@ -1492,8 +1769,6 @@ Rules:
         const actionHistory = [];
 
         for (let step = 0; step < AGENT_MAX_STEPS; step++) {
-            // Use only the selected provider and the user's own key.
-            // No automatic server-key fallback is performed.
             const modelResult = await agentCallProvider(
                 actualProvider,
                 conversation,
@@ -1572,7 +1847,6 @@ Rules:
         });
 
     } catch (error) {
-        // Never log request bodies or user API keys.
         const status = error.response?.status || 500;
 
         const providerError =
