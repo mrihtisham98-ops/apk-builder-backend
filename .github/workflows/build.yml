@@ -648,6 +648,57 @@ jobs:
       # This step never fails the build on download errors — it
       # only reports them.
       # ============================================================
+      # ============================================================
+      # COMPILE TAILWIND LOCALLY
+      # The Tailwind Play CDN is a browser-side runtime compiler.
+      # Compile utility classes during the GitHub build instead, so
+      # the APK does not depend on a CDN or runtime network access.
+      # ============================================================
+      - name: Compile Tailwind CSS for WebView
+        run: |
+          set -euo pipefail
+          ASSETS="myapp/app/src/main/assets"
+          if [ ! -f "$ASSETS/index.html" ]; then
+            echo "ERROR: index.html not found before Tailwind compilation."
+            exit 1
+          fi
+
+          mkdir -p "$ASSETS/_generated"
+          cat > /tmp/tailwind.input.css <<'CSS'
+          @tailwind base;
+          @tailwind components;
+          @tailwind utilities;
+          CSS
+
+          cat > /tmp/tailwind.config.cjs <<'JS'
+          module.exports = {
+            content: [
+              "./myapp/app/src/main/assets/**/*.html",
+              "./myapp/app/src/main/assets/**/*.js"
+            ],
+            theme: { extend: {} },
+            plugins: []
+          };
+          JS
+
+          npx --yes tailwindcss@3.4.17 \
+            --config /tmp/tailwind.config.cjs \
+            --input /tmp/tailwind.input.css \
+            --output "$ASSETS/_generated/tailwind.css" \
+            --minify
+
+          if [ ! -s "$ASSETS/_generated/tailwind.css" ]; then
+            echo "ERROR: Tailwind CSS output is missing or empty."
+            exit 1
+          fi
+
+          echo "========== TAILWIND CSS VERIFICATION =========="
+          wc -c "$ASSETS/_generated/tailwind.css"
+          head -c 180 "$ASSETS/_generated/tailwind.css"
+          echo
+          echo "Tailwind CSS compiled and saved inside APK assets."
+          echo "==============================================="
+
       - name: Offline Dependency Bundling
         env:
           PYTHONUNBUFFERED: "1"
