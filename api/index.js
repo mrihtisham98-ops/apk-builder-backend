@@ -4,7 +4,7 @@ const axios = require('axios');
 const crypto = require('crypto');
 const { applyAdMobIntegration } = require('../lib/admob-injector');
 // [NEW] R2 Integration ke liye AWS SDK imports
-const { S3Client, PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 
 const app = express();
@@ -210,6 +210,29 @@ app.post('/api/r2-upload-complete', async (req, res) => {
             return res.status(500).json({ success: false, error: 'GITHUB_TOKEN is not configured.' });
         }
 
+        // Only allow the ZIP belonging to this build ID.
+        const expectedFileKey = `uploads/${buildId}.zip`;
+        if (fileKey !== expectedFileKey) {
+            return res.status(400).json({
+                success: false,
+                error: 'Invalid R2 fileKey for this buildId.'
+            });
+        }
+
+        const requiredEnv = [
+            'R2_ACCOUNT_ID',
+            'R2_ACCESS_KEY_ID',
+            'R2_SECRET_ACCESS_KEY',
+            'R2_BUCKET_NAME'
+        ];
+        const missingEnv = requiredEnv.filter((name) => !process.env[name]);
+        if (missingEnv.length) {
+            return res.status(500).json({
+                success: false,
+                error: `Missing R2 environment variables: ${missingEnv.join(', ')}`
+            });
+        }
+
         const config = {
             buildId,
             appName: String(appName || 'App').slice(0, 60),
@@ -218,12 +241,27 @@ app.post('/api/r2-upload-complete', async (req, res) => {
             r2ZipKey: fileKey
         };
 
+        // GitHub Actions cannot access Vercel environment variables.
+        // Create a temporary signed GET URL so the workflow can fetch
+        // the ZIP directly from R2 without exposing R2 credentials.
+        const downloadCommand = new GetObjectCommand({
+            Bucket: process.env.R2_BUCKET_NAME,
+            Key: fileKey
+        });
+        const downloadUrl = await getSignedUrl(
+            r2Client,
+            downloadCommand,
+            { expiresIn: 3600 }
+        );
+
         // GitHub dispatch trigger karein
         await github.post(`${API}/dispatches`, {
             event_type: 'build_apk',
             client_payload: {
                 buildId,
                 config,
+                fileKey,
+                downloadUrl,
                 source: 'r2'
             }
         });
