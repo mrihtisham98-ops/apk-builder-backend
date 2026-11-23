@@ -177,2005 +177,2221 @@ jobs:
 
       - name: Set up Gradle Cache
         uses: gradle/actions/setup-gradle@v4
+- name: Read Build Configuration and Copy Project
+  env:
+    BUILD_ID: ${{ github.event.client_payload.buildId }}
+  run: |
+    python3 - <<'PY'
+    import json
+    import os
+    import shutil
+    import re
+    import xml.etree.ElementTree as ET
+    from pathlib import Path
+    from PIL import Image, ImageOps
 
-      - name: Read Build Configuration and Copy Project
-        env:
-          BUILD_ID: ${{ github.event.client_payload.buildId }}
-        run: |
-          python3 - <<'PY'
-          import json
-          import os
-          import shutil
-          import re
-          import xml.etree.ElementTree as ET
-          from pathlib import Path
-          from PIL import Image, ImageOps
+    build_id = os.environ["BUILD_ID"]
+    source = Path("source/.build-input") / build_id
+    config_file = source / "build-config.json"
+    project = source / "project"
 
-          build_id = os.environ["BUILD_ID"]
-          source = Path("source/.build-input") / build_id
-          config_file = source / "build-config.json"
-          project = source / "project"
+    if not config_file.is_file():
+        raise SystemExit("ERROR: build-config.json not found.")
 
-          if not config_file.is_file():
-              raise SystemExit("ERROR: build-config.json not found.")
+    config = json.loads(config_file.read_text(encoding="utf-8"))
 
-          config = json.loads(config_file.read_text(encoding="utf-8"))
+    app_name = config.get("appName", "My Web App")
+    package_name = config.get("packageName", "")
+    icon_path = config.get("iconPath")
 
-          app_name = config.get("appName", "My Web App")
-          package_name = config.get("packageName", "")
-          icon_path = config.get("iconPath")
+    if not re.fullmatch(
+        r"[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z][a-zA-Z0-9_]*)+",
+        package_name
+    ):
+        raise SystemExit("ERROR: Invalid package name.")
 
-          if not re.fullmatch(
-              r"[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z][a-zA-Z0-9_]*)+",
-              package_name
-          ):
-              raise SystemExit("ERROR: Invalid package name.")
+    if not (project / "index.html").is_file():
+        raise SystemExit("ERROR: Root index.html is missing.")
 
-          if not (project / "index.html").is_file():
-              raise SystemExit("ERROR: Root index.html is missing.")
+    root = Path("myapp")
+    assets = root / "app/src/main/assets"
+    java_dir = root / "app/src/main/java" / Path(*package_name.split("."))
 
-          root = Path("myapp")
-          assets = root / "app/src/main/assets"
-          java_dir = root / "app/src/main/java" / Path(*package_name.split("."))
+    assets.mkdir(parents=True, exist_ok=True)
+    java_dir.mkdir(parents=True, exist_ok=True)
 
-          assets.mkdir(parents=True, exist_ok=True)
-          java_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(project, assets, dirs_exist_ok=True)
 
-          shutil.copytree(project, assets, dirs_exist_ok=True)
+    # Verify copied HTML project assets
+    all_files = [p for p in assets.rglob("*") if p.is_file()]
+    total_size = sum(p.stat().st_size for p in all_files)
 
-          # Verify copied HTML project assets
-          all_files = [p for p in assets.rglob("*") if p.is_file()]
-          total_size = sum(p.stat().st_size for p in all_files)
+    print("========== ASSET VERIFICATION ==========")
+    print("Total files copied:", len(all_files))
+    print("Total asset size:", round(total_size / (1024 * 1024), 2), "MB")
+    print("Index HTML exists:", (assets / "index.html").is_file())
 
-          print("========== ASSET VERIFICATION ==========")
-          print("Total files copied:", len(all_files))
-          print("Total asset size:", round(total_size / (1024 * 1024), 2), "MB")
-          print("Index HTML exists:", (assets / "index.html").is_file())
+    for file in all_files[:50]:
+        print("ASSET:", file.relative_to(assets))
 
-          for file in all_files[:50]:
-              print("ASSET:", file.relative_to(assets))
+    print("========================================")
 
-          print("========================================")
+    # Create Android manifest.
+    android_ns = "http://schemas.android.com/apk/res/android"
+    ET.register_namespace("android", android_ns)
 
-          # Create Android manifest.
-          android_ns = "http://schemas.android.com/apk/res/android"
-          ET.register_namespace("android", android_ns)
+    manifest = ET.Element("manifest")
+    manifest.set("package", package_name)
 
-          manifest = ET.Element("manifest")
-          manifest.set("package", package_name)
+    permission = ET.SubElement(manifest, "uses-permission")
+    permission.set(
+        f"{{{android_ns}}}name",
+        "android.permission.INTERNET"
+    )
 
-          permission = ET.SubElement(manifest, "uses-permission")
-          permission.set(
-              f"{{{android_ns}}}name",
-              "android.permission.INTERNET"
-          )
+    application = ET.SubElement(manifest, "application")
+    application.set(f"{{{android_ns}}}label", app_name)
+    application.set(
+        f"{{{android_ns}}}theme",
+        "@android:style/Theme.Material.Light.NoActionBar"
+    )
+    application.set(
+        f"{{{android_ns}}}usesCleartextTraffic",
+        "true"
+    )
 
-          application = ET.SubElement(manifest, "application")
-          application.set(f"{{{android_ns}}}label", app_name)
-          application.set(
-              f"{{{android_ns}}}theme",
-              "@android:style/Theme.Material.Light.NoActionBar"
-          )
-          application.set(
-              f"{{{android_ns}}}usesCleartextTraffic",
-              "true"
-          )
+    activity = ET.SubElement(application, "activity")
+    activity.set(
+        f"{{{android_ns}}}name",
+        ".MainActivity"
+    )
+    activity.set(
+        f"{{{android_ns}}}exported",
+        "true"
+    )
 
-          activity = ET.SubElement(application, "activity")
-          activity.set(
-              f"{{{android_ns}}}name",
-              ".MainActivity"
-          )
-          activity.set(
-              f"{{{android_ns}}}exported",
-              "true"
-          )
+    intent = ET.SubElement(activity, "intent-filter")
+    action = ET.SubElement(intent, "action")
+    action.set(
+        f"{{{android_ns}}}name",
+        "android.intent.action.MAIN"
+    )
 
-          intent = ET.SubElement(activity, "intent-filter")
-          action = ET.SubElement(intent, "action")
-          action.set(
-              f"{{{android_ns}}}name",
-              "android.intent.action.MAIN"
-          )
+    category = ET.SubElement(intent, "category")
+    category.set(
+        f"{{{android_ns}}}name",
+        "android.intent.category.LAUNCHER"
+    )
 
-          category = ET.SubElement(intent, "category")
-          category.set(
-              f"{{{android_ns}}}name",
-              "android.intent.category.LAUNCHER"
-          )
+    manifest_path = root / "app/src/main/AndroidManifest.xml"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
 
-          manifest_path = root / "app/src/main/AndroidManifest.xml"
-          manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    # =====================================================
+    # CUSTOM APP ICON FIX
+    # Locate the uploaded image and create Android icons.
+    # =====================================================
 
-          # =====================================================
-          # CUSTOM APP ICON FIX
-          # Locate the uploaded image and create Android icons.
-          # =====================================================
+    print("========== APP ICON DETECTION ==========")
+    print("Configured iconPath:", repr(icon_path))
 
-          print("========== APP ICON DETECTION ==========")
-          print("Configured iconPath:", repr(icon_path))
+    supported_extensions = {
+        ".png", ".jpg", ".jpeg", ".webp"
+    }
 
-          supported_extensions = {
-              ".png", ".jpg", ".jpeg", ".webp"
+    icon_file = None
+
+    # 1. First try the exact iconPath from build-config.json.
+    if icon_path and isinstance(icon_path, str):
+        configured_file = (source / icon_path).resolve()
+        source_resolved = source.resolve()
+
+        try:
+            configured_file.relative_to(source_resolved)
+        except ValueError:
+            raise SystemExit(
+                "ERROR: Icon path is outside build directory."
+            )
+
+        if configured_file.is_file():
+            icon_file = configured_file
+            print("Icon found using iconPath:", icon_file)
+
+        else:
+            print("Configured iconPath file not found.")
+
+    # 2. Search common icon filenames if iconPath is missing.
+    if icon_file is None:
+        preferred_names = [
+            "app-icon.png",
+            "app-icon.jpg",
+            "app-icon.jpeg",
+            "app-icon.webp",
+            "app_icon.png",
+            "app_icon.jpg",
+            "icon.png",
+            "icon.jpg",
+            "icon.jpeg",
+            "icon.webp",
+            "launcher.png",
+            "launcher.jpg",
+            "launcher.webp"
+        ]
+
+        for filename in preferred_names:
+            candidate = source / filename
+
+            if candidate.is_file():
+                icon_file = candidate
+                print("Icon found using filename:", candidate)
+                break
+
+    # 3. Search uploaded image files outside the project folder.
+    if icon_file is None:
+        image_candidates = []
+
+        for candidate in source.rglob("*"):
+            if not candidate.is_file():
+                continue
+
+            if "project" in candidate.relative_to(source).parts:
+                continue
+
+            if candidate.name == "build-config.json":
+                continue
+
+            if candidate.suffix.lower() in supported_extensions:
+                image_candidates.append(candidate)
+
+        named_candidates = [
+            item for item in image_candidates
+            if "icon" in item.stem.lower()
+            or "launcher" in item.stem.lower()
+            or "logo" in item.stem.lower()
+        ]
+
+        if len(named_candidates) == 1:
+            icon_file = named_candidates[0]
+
+        elif len(image_candidates) == 1:
+            icon_file = image_candidates[0]
+
+        elif len(named_candidates) > 1:
+            raise SystemExit(
+                "ERROR: Multiple possible icon images found. "
+                "Please provide a clear iconPath in build-config.json."
+            )
+
+        elif len(image_candidates) > 1:
+            raise SystemExit(
+                "ERROR: Multiple images found and no clear app icon "
+                "could be identified."
+            )
+
+    icon_enabled = False
+
+    if icon_file is not None:
+        print("SELECTED ICON:", icon_file)
+        print("ICON EXISTS:", icon_file.is_file())
+
+        try:
+            with Image.open(icon_file) as original:
+                original.load()
+                image = ImageOps.exif_transpose(original).convert("RGBA")
+
+            if image.width < 1 or image.height < 1:
+                raise ValueError("Invalid image dimensions.")
+
+            print(
+                "Original icon dimensions:",
+                image.width,
+                "x",
+                image.height
+            )
+
+            # Make a square transparent launcher image.
+            # This preserves the complete uploaded image.
+            for folder, size in [
+                ("mipmap-mdpi", 48),
+                ("mipmap-hdpi", 72),
+                ("mipmap-xhdpi", 96),
+                ("mipmap-xxhdpi", 144),
+                ("mipmap-xxxhdpi", 192)
+            ]:
+                target = root / "app/src/main/res" / folder
+                target.mkdir(parents=True, exist_ok=True)
+
+                resized = ImageOps.contain(
+                    image,
+                    (size, size),
+                    method=Image.Resampling.LANCZOS
+                )
+
+                canvas = Image.new(
+                    "RGBA",
+                    (size, size),
+                    (0, 0, 0, 0)
+                )
+
+                x = (size - resized.width) // 2
+                y = (size - resized.height) // 2
+
+                canvas.alpha_composite(resized, (x, y))
+
+                output_file = target / "ic_launcher.png"
+                canvas.save(output_file, format="PNG")
+
+                print(
+                    "CREATED ICON:",
+                    output_file,
+                    output_file.stat().st_size,
+                    "bytes"
+                )
+
+            # Set both standard and round launcher icons.
+            application.set(
+                f"{{{android_ns}}}icon",
+                "@mipmap/ic_launcher"
+            )
+
+            application.set(
+                f"{{{android_ns}}}roundIcon",
+                "@mipmap/ic_launcher"
+            )
+
+            icon_enabled = True
+
+            print("CUSTOM ICON GENERATED SUCCESSFULLY.")
+
+        except Exception as error:
+            raise SystemExit(
+                "ERROR: Could not process uploaded app icon: "
+                + str(error)
+            )
+
+    else:
+        if icon_path:
+            raise SystemExit(
+                "ERROR: iconPath was provided but no valid icon "
+                "image was found."
+            )
+
+        print(
+            "WARNING: No custom icon was uploaded. "
+            "Android default icon will be used."
+        )
+
+    # Write the final manifest after setting icon attributes.
+    ET.ElementTree(manifest).write(
+        manifest_path,
+        encoding="utf-8",
+        xml_declaration=True
+    )
+
+    # Verify generated launcher icons.
+    if icon_enabled:
+        for folder in [
+            "mipmap-mdpi",
+            "mipmap-hdpi",
+            "mipmap-xhdpi",
+            "mipmap-xxhdpi",
+            "mipmap-xxxhdpi"
+        ]:
+            generated = (
+                root / "app/src/main/res" / folder / "ic_launcher.png"
+            )
+
+            if not generated.is_file() or generated.stat().st_size == 0:
+                raise SystemExit(
+                    "ERROR: Launcher icon missing: " + str(generated)
+                )
+
+        check_tree = ET.parse(manifest_path)
+        check_application = check_tree.getroot().find("application")
+
+        if check_application is None:
+            raise SystemExit("ERROR: Application element missing.")
+
+        if check_application.get(
+            f"{{{android_ns}}}icon"
+        ) != "@mipmap/ic_launcher":
+            raise SystemExit("ERROR: android:icon was not configured.")
+
+        if check_application.get(
+            f"{{{android_ns}}}roundIcon"
+        ) != "@mipmap/ic_launcher":
+            raise SystemExit(
+                "ERROR: android:roundIcon was not configured."
+            )
+
+        print("LAUNCHER ICON VERIFICATION PASSED.")
+
+    # Create MainActivity with Android WebView file picker support.
+    # FIX 1: WebViewAssetLoader is used so woff2 fonts load correctly
+    # and Font Awesome icons render properly. file:// URLs block
+    # cross-origin font loading on Android 7+ which causes invisible
+    # but clickable icons.
+    java_code = f'''package {package_name};
+
+    import android.app.Activity;
+    import android.os.Bundle;
+    import android.content.Intent;
+    import android.net.Uri;
+    import android.webkit.WebView;
+    import android.webkit.WebViewClient;
+    import android.webkit.WebChromeClient;
+    import android.webkit.WebSettings;
+    import android.webkit.ValueCallback;
+    import android.webkit.WebResourceRequest;
+    import android.webkit.WebResourceResponse;
+    import android.content.ActivityNotFoundException;
+
+    import androidx.webkit.WebViewAssetLoader;
+
+    public class MainActivity extends Activity {{
+        private WebView webView;
+        private ValueCallback<Uri[]> filePathCallback;
+        private static final int FILE_CHOOSER_REQUEST_CODE = 1001;
+
+        @Override
+        protected void onCreate(Bundle savedInstanceState) {{
+            super.onCreate(savedInstanceState);
+
+            webView = new WebView(this);
+
+            WebSettings settings = webView.getSettings();
+            settings.setJavaScriptEnabled(true);
+            settings.setDomStorageEnabled(true);
+            settings.setAllowFileAccess(true);
+            settings.setAllowContentAccess(true);
+
+            final WebViewAssetLoader assetLoader = new WebViewAssetLoader.Builder()
+                .addPathHandler("/assets/", new WebViewAssetLoader.AssetsPathHandler(this))
+                .build();
+
+            webView.setWebViewClient(new WebViewClient() {{
+                @Override
+                public WebResourceResponse shouldInterceptRequest(
+                        WebView view, WebResourceRequest request) {{
+                    return assetLoader.shouldInterceptRequest(request.getUrl());
+                }}
+            }});
+
+            webView.setWebChromeClient(new WebChromeClient() {{
+                @Override
+                public boolean onShowFileChooser(
+                        WebView webView,
+                        ValueCallback<Uri[]> filePathCallback,
+                        FileChooserParams fileChooserParams) {{
+
+                    if (MainActivity.this.filePathCallback != null) {{
+                        MainActivity.this.filePathCallback.onReceiveValue(null);
+                        MainActivity.this.filePathCallback = null;
+                    }}
+
+                    MainActivity.this.filePathCallback = filePathCallback;
+
+                    try {{
+                        Intent intent = fileChooserParams.createIntent();
+                        startActivityForResult(
+                            intent,
+                            FILE_CHOOSER_REQUEST_CODE
+                        );
+                        return true;
+                    }} catch (ActivityNotFoundException exception) {{
+                        MainActivity.this.filePathCallback = null;
+                        return false;
+                    }}
+                }}
+            }});
+
+            webView.loadUrl("https://appassets.androidplatform.net/assets/index.html");
+            setContentView(webView);
+        }}
+
+        @Override
+        protected void onActivityResult(
+                int requestCode,
+                int resultCode,
+                Intent data) {{
+            super.onActivityResult(requestCode, resultCode, data);
+
+            if (requestCode == FILE_CHOOSER_REQUEST_CODE) {{
+                if (filePathCallback == null) {{
+                    return;
+                }}
+
+                Uri[] results = null;
+
+                if (resultCode == Activity.RESULT_OK && data != null) {{
+                    results = WebChromeClient.FileChooserParams.parseResult(
+                        resultCode,
+                        data
+                    );
+                }}
+
+                filePathCallback.onReceiveValue(results);
+                filePathCallback = null;
+            }}
+        }}
+
+        @Override
+        public void onBackPressed() {{
+            if (webView != null && webView.canGoBack()) {{
+                webView.goBack();
+            }} else {{
+                super.onBackPressed();
+            }}
+        }}
+    }}
+    '''
+
+    (java_dir / "MainActivity.java").write_text(
+        java_code,
+        encoding="utf-8"
+    )
+
+    print("Project files copied successfully.")
+    print("App:", app_name)
+    print("Package:", package_name)
+    print("Custom icon enabled:", icon_enabled)
+    PY
+# ============================================================
+# COMPILE TAILWIND LOCALLY
+# The Tailwind Play CDN is a browser-side runtime compiler.
+# Compile utility classes during the GitHub build instead, so
+# the APK does not depend on a CDN or runtime network access.
+# ============================================================
+- name: Compile Tailwind CSS for WebView
+  run: |
+    set -euo pipefail
+    ASSETS="myapp/app/src/main/assets"
+    if [ ! -f "$ASSETS/index.html" ]; then
+      echo "ERROR: index.html not found before Tailwind compilation."
+      exit 1
+    fi
+
+    mkdir -p "$ASSETS/_generated"
+    cat > /tmp/tailwind.input.css <<'CSS'
+    @tailwind base;
+    @tailwind components;
+    @tailwind utilities;
+    CSS
+
+    cat > /tmp/tailwind.config.cjs <<'JS'
+    module.exports = {
+      content: [
+        "./myapp/app/src/main/assets/**/*.html",
+        "./myapp/app/src/main/assets/**/*.js"
+      ],
+      theme: { extend: {} },
+      plugins: []
+    };
+    JS
+
+    npx --yes tailwindcss@3.4.17 \
+      --config /tmp/tailwind.config.cjs \
+      --input /tmp/tailwind.input.css \
+      --output "$ASSETS/_generated/tailwind.css" \
+      --minify
+
+    if [ ! -s "$ASSETS/_generated/tailwind.css" ]; then
+      echo "ERROR: Tailwind CSS output is missing or empty."
+      exit 1
+    fi
+
+    echo "========== TAILWIND CSS VERIFICATION =========="
+    wc -c "$ASSETS/_generated/tailwind.css"
+    head -c 180 "$ASSETS/_generated/tailwind.css"
+    echo
+    echo "Tailwind CSS compiled and saved inside APK assets."
+    echo "==============================================="
+
+# ============================================================
+# FIX 2 (NEW STEP): Inject local Tailwind CSS link into APK
+# index.html so the APK does not depend on the Tailwind Play CDN
+# at runtime. This replaces the CDN <script> tag with a local
+# <link> tag pointing at _generated/tailwind.css.
+#
+# IMPORTANT: This step ONLY modifies the APK copy of index.html
+# (myapp/app/src/main/assets/index.html). The original index.html
+# on Vercel / GitHub is NOT touched, so the online version keeps
+# its original working design.
+# ============================================================
+- name: Inject Tailwind CSS link into APK index.html
+  run: |
+    set -euo pipefail
+    ASSETS="myapp/app/src/main/assets"
+    INDEX="$ASSETS/index.html"
+    if [ ! -f "$INDEX" ]; then
+      echo "ERROR: index.html missing before Tailwind injection."
+      exit 1
+    fi
+    python3 - <<'PY'
+    from pathlib import Path
+
+    p = Path("myapp/app/src/main/assets/index.html")
+    html = p.read_text(encoding="utf-8")
+    orig = html
+
+    # Replace the Tailwind Play CDN <script> tag with a local <link>.
+    # Handles both single and double quotes, and optional self-closing.
+    replacements = [
+        ('<script src="https://cdn.tailwindcss.com"></script>',
+         '<link rel="stylesheet" href="_generated/tailwind.css">'),
+        ("<script src='https://cdn.tailwindcss.com'></script>",
+         '<link rel="stylesheet" href="_generated/tailwind.css">'),
+    ]
+
+    applied = False
+    for old, new in replacements:
+        if old in html:
+            html = html.replace(old, new)
+            applied = True
+            break
+
+    if not applied:
+        # Fallback: regex replacement tolerant of attributes/whitespace.
+        import re
+        pattern = re.compile(
+            r'<script[^>]*\bsrc\s*=\s*["\']https://cdn\.tailwindcss\.com["\'][^>]*>\s*</script>',
+            re.IGNORECASE,
+        )
+        new_html, n = pattern.subn(
+            '<link rel="stylesheet" href="_generated/tailwind.css">',
+            html,
+        )
+        if n > 0:
+            html = new_html
+            applied = True
+
+    if not applied:
+        raise SystemExit(
+            "ERROR: Tailwind <script src=\"https://cdn.tailwindcss.com\"> "
+            "tag not found in APK index.html. Cannot inject local CSS."
+        )
+
+    p.write_text(html, encoding="utf-8")
+    print("Tailwind CDN script replaced with local _generated/tailwind.css")
+    print("APK index.html now uses local Tailwind CSS. Offline design will work.")
+    PY
+
+    # Verify the replacement actually happened.
+    if grep -q "cdn.tailwindcss.com" "$ASSETS/index.html"; then
+      echo "ERROR: Tailwind CDN still present in APK index.html after injection."
+      exit 1
+    fi
+    echo "Verified: Tailwind CDN removed from APK index.html."
+
+# ============================================================
+# OFFLINE DEPENDENCY BUNDLING SYSTEM (ADDED)
+# Downloads external CSS / JS / fonts / icons / images
+# referenced by HTML and CSS files, saves them locally in
+# the APK assets, rewrites URLs to local relative paths, and
+# writes offline-bundling-report.json.
+# This step never fails the build on download errors — it
+# only reports them.
+# ============================================================
+- name: Offline Dependency Bundling
+  env:
+    PYTHONUNBUFFERED: "1"
+  run: |
+    set -uo pipefail
+    python3 - <<'PY'
+    import hashlib
+    import json
+    import os
+    import re
+    import sys
+    import time
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+    from pathlib import Path
+
+    ASSETS = Path("myapp/app/src/main/assets")
+    REPORT_PATH = ASSETS / "offline-bundling-report.json"
+    LOCAL_VENDOR_DIR = ASSETS / "_offline_vendor"
+
+    DOWNLOAD_TIMEOUT = 30
+    MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024
+    MAX_RESOURCES = 500
+    USER_AGENT = (
+        "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36"
+    )
+
+    # Mime -> extension fallback when URL has no usable suffix.
+    MIME_EXT = {
+        "text/css": ".css",
+        "text/javascript": ".js",
+        "application/javascript": ".js",
+        "application/x-javascript": ".js",
+        "image/png": ".png",
+        "image/jpeg": ".jpg",
+        "image/jpg": ".jpg",
+        "image/gif": ".gif",
+        "image/svg+xml": ".svg",
+        "image/webp": ".webp",
+        "image/x-icon": ".ico",
+        "image/vnd.microsoft.icon": ".ico",
+        "image/avif": ".avif",
+        "font/woff": ".woff",
+        "font/woff2": ".woff2",
+        "application/font-woff": ".woff",
+        "application/font-woff2": ".woff2",
+        "font/ttf": ".ttf",
+        "application/x-font-ttf": ".ttf",
+        "font/otf": ".otf",
+        "application/vnd.ms-fontobject": ".eot",
+        "video/mp4": ".mp4",
+        "video/webm": ".webm",
+        "application/json": ".json",
+    }
+
+    SAFE_EXT_RE = re.compile(r"^\.[A-Za-z0-9]{1,8}$")
+
+    downloaded = []
+    failed = []
+    unsupported = []
+    already_local = []
+    url_cache = {}
+
+    total_downloaded_bytes = 0
+
+    print("========== OFFLINE BUNDLING START ==========")
+
+    if not ASSETS.is_dir():
+        print("Assets directory not found — skipping bundling.")
+        raise SystemExit(0)
+
+    ASSETS.mkdir(parents=True, exist_ok=True)
+    LOCAL_VENDOR_DIR.mkdir(parents=True, exist_ok=True)
+
+    def safe_ext_from_url(url):
+        try:
+            path = urllib.parse.urlparse(url).path
+        except Exception:
+            return ""
+        suffix = Path(path).suffix.lower()
+        if suffix and SAFE_EXT_RE.match(suffix):
+            return suffix
+        return ""
+
+    def guess_ext(url, content_type):
+        ext = safe_ext_from_url(url)
+        if ext:
+            return ext
+        if content_type:
+            base = content_type.split(";", 1)[0].strip().lower()
+            if base in MIME_EXT:
+                return MIME_EXT[base]
+        return ".bin"
+
+    def is_external(url):
+        if not url:
+            return False
+        u = url.strip()
+        if not u:
+            return False
+        low = u.lower()
+        if low.startswith("data:") or low.startswith("blob:"):
+            return False
+        if low.startswith("javascript:") or low.startswith("mailto:"):
+            return False
+        if low.startswith("#"):
+            return False
+        if low.startswith("//"):
+            return True
+        if low.startswith("http://") or low.startswith("https://"):
+            return True
+        return False
+
+    def normalize_url(url, base_url):
+        if url.startswith("//"):
+            if base_url and base_url.startswith("http://"):
+                url = "http://" + url[2:]
+            else:
+                url = "https://" + url[2:]
+        try:
+            return urllib.parse.urljoin(base_url, url)
+        except Exception:
+            return url
+
+    def download_resource(url, referer=None):
+        """Return (bytes, content_type) or (None, error_string)."""
+        if url in url_cache:
+            return url_cache[url]
+
+        headers = {
+            "User-Agent": USER_AGENT,
+            "Accept": "*/*",
+        }
+        if referer:
+            headers["Referer"] = referer
+
+        request = urllib.request.Request(url, headers=headers)
+        try:
+            with urllib.request.urlopen(
+                request, timeout=DOWNLOAD_TIMEOUT
+            ) as response:
+                content_type = response.headers.get("Content-Type", "")
+                chunks = []
+                total = 0
+                while True:
+                    chunk = response.read(65536)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > MAX_DOWNLOAD_BYTES:
+                        url_cache[url] = (
+                            None,
+                            "exceeds max download size"
+                        )
+                        return url_cache[url]
+                    chunks.append(chunk)
+                data = b"".join(chunks)
+                if not data:
+                    url_cache[url] = (None, "empty response")
+                    return url_cache[url]
+                url_cache[url] = (data, content_type)
+                return url_cache[url]
+        except urllib.error.HTTPError as e:
+            url_cache[url] = (None, "HTTP " + str(e.code))
+            return url_cache[url]
+        except urllib.error.URLError as e:
+            url_cache[url] = (
+                None,
+                "URL error: " + str(e.reason)
+            )
+            return url_cache[url]
+        except Exception as e:
+            url_cache[url] = (
+                None,
+                "Download error: " + str(e)
+            )
+            return url_cache[url]
+
+    def local_filename_for_url(url, content_type):
+        """Deterministic, collision-free local filename."""
+        parsed = urllib.parse.urlparse(url)
+        stem = Path(parsed.path).stem or "resource"
+        stem = re.sub(r"[^A-Za-z0-9._-]+", "_", stem)[:40]
+        if not stem:
+            stem = "resource"
+        ext = guess_ext(url, content_type)
+        digest = hashlib.sha1(
+            url.encode("utf-8")
+        ).hexdigest()[:10]
+        return stem + "_" + digest + ext
+
+    def rewrite_url_to_local(original, local_filename, base_url):
+        """Compute a browser-relative path from the referencing
+        file's folder (base_url is the folder of the referrer,
+        not a URL). Returns a relative string using forward slashes."""
+        # base_url here is the *file path* of the referrer.
+        # We compute relative path from its parent to the local file.
+        base_dir = Path(base_url).parent if base_url else Path(".")
+        try:
+            rel = os.path.relpath(
+                LOCAL_VENDOR_DIR / local_filename,
+                base_dir
+            ).replace(os.sep, "/")
+        except Exception:
+            rel = "_offline_vendor/" + local_filename
+        return rel
+
+    def fetch_and_store(url, referer_file, base_url_for_join):
+        """Download URL, save to vendor dir, return local filename."""
+        global total_downloaded_bytes
+        if len(downloaded) >= MAX_RESOURCES:
+            return None
+        data, extra = download_resource(url, referer=referer_file)
+        if data is None:
+            failed.append({
+                "url": url,
+                "reason": extra,
+                "referer": str(referer_file),
+            })
+            return None
+        content_type = extra
+        filename = local_filename_for_url(url, content_type)
+        target = LOCAL_VENDOR_DIR / filename
+        if not target.is_file() or target.stat().st_size == 0:
+            try:
+                target.write_bytes(data)
+            except Exception as e:
+                failed.append({
+                    "url": url,
+                    "reason": "write failed: " + str(e),
+                    "referer": str(referer_file),
+                })
+                return None
+            total_downloaded_bytes += len(data)
+        entry = {
+            "url": url,
+            "local_path": str(target.relative_to(ASSETS)),
+            "bytes": len(data),
+            "content_type": content_type,
+            "referer": str(referer_file),
+        }
+        # De-duplicate by URL
+        if not any(d["url"] == url for d in downloaded):
+            downloaded.append(entry)
+        return filename
+
+    # ============================================================
+    # HTML scanning
+    # ============================================================
+    ATTR_NAMES_FOR_URLS = {
+        "src", "href", "poster", "data", "background", "icon",
+    }
+
+    SRC_WITHOUT_DOWNLOAD = {
+        "iframe", "frame", "object", "embed", "track",
+    }
+
+    SCRIPT_MODULE_RE = re.compile(
+        r'<script[^>]*\btype\s*=\s*["\']module["\']',
+        re.IGNORECASE,
+    )
+    DYNAMIC_IMPORT_RE = re.compile(
+        r'\bimport\s*\(\s*[\'"`]', re.IGNORECASE
+    )
+    FETCH_RE = re.compile(
+        r'\b(fetch|axios\.(get|post)|XMLHttpRequest)\s*\(', re.IGNORECASE
+    )
+
+    # Lightweight HTML attribute regex — not a full parser, but
+    # sufficient for static attribute scanning of common tags.
+    HTML_URL_ATTR_RE = re.compile(
+        r"""(?P<attr>\b(?:src|href|poster|data|background|icon))\s*=\s*"""
+        r"""(?:"(?P<dq>[^"]*)"|'(?P<sq>[^']*)'|(?P<bare>[^\s>]+))""",
+        re.IGNORECASE,
+    )
+
+    SRCSET_RE = re.compile(
+        r"""\bsrcset\s*=\s*(?:"(?P<dq>[^"]*)"|'(?P<sq>[^']*)')""",
+        re.IGNORECASE,
+    )
+
+    STYLE_BLOCK_RE = re.compile(
+        r"<style\b[^>]*>(?P<css>.*?)</style>",
+        re.DOTALL | re.IGNORECASE,
+    )
+
+    INLINE_STYLE_RE = re.compile(
+        r"""\bstyle\s*=\s*(?:"(?P<dq>[^"]*)"|'(?P<sq>[^']*)')""",
+        re.IGNORECASE,
+    )
+
+    CSS_URL_RE = re.compile(
+        r"""url\(\s*(?:"(?P<dq>[^"\)]*)"|'(?P<sq>[^'\)]*)'|(?P<bare>[^\)"'\s]+))\s*\)""",
+        re.IGNORECASE,
+    )
+
+    CSS_IMPORT_RE = re.compile(
+        r"""@import\s+(?:url\(\s*)?(?:"(?P<dq>[^"]*)"|'(?P<sq>[^']*)'|(?P<bare>[^\s\)'";]+))""",
+        re.IGNORECASE,
+    )
+
+    def extract_srcset_urls(value):
+        urls = []
+        for part in value.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            pieces = part.split()
+            if not pieces:
+                continue
+            urls.append(pieces[0])
+        return urls
+
+    def resolve_local_path_for_rewrite(asset_file):
+        """Return a path string used by os.path.relpath — must be
+        absolute or rooted at CWD consistently. We use the path
+        relative to CWD so relpath math is stable."""
+        return Path(os.path.relpath(asset_file, Path(".")))
+
+    def process_css_text(css_text, css_file_path, referer_url):
+        """Rewrite CSS url()/@import to local paths, download targets.
+        Returns new CSS text and list of newly created css files to
+        process recursively."""
+        new_css = css_text
+        new_css_files_to_visit = []
+
+        # @import first (before url()) so we can capture the CSS file.
+        def import_repl(match):
+            raw = (
+                match.group("dq")
+                or match.group("sq")
+                or match.group("bare")
+            )
+            if not raw or not is_external(raw):
+                return match.group(0)
+            absolute = normalize_url(raw, referer_url)
+            local = fetch_and_store(
+                absolute,
+                referer_file=css_file_path,
+                base_url_for_join=referer_url,
+            )
+            if not local:
+                return match.group(0)
+            new_css_files_to_visit.append(LOCAL_VENDOR_DIR / local)
+            return "@import url(\"{}\")".format(
+                rewrite_url_to_local(
+                    raw, local, str(css_file_path)
+                )
+            )
+
+        new_css = CSS_IMPORT_RE.sub(import_repl, new_css)
+
+        def url_repl(match):
+            raw = (
+                match.group("dq")
+                or match.group("sq")
+                or match.group("bare")
+            )
+            if not raw or not is_external(raw):
+                return match.group(0)
+            absolute = normalize_url(raw, referer_url)
+            local = fetch_and_store(
+                absolute,
+                referer_file=css_file_path,
+                base_url_for_join=referer_url,
+            )
+            if not local:
+                return match.group(0)
+            return "url(\"{}\")".format(
+                rewrite_url_to_local(
+                    raw, local, str(css_file_path)
+                )
+            )
+
+        new_css = CSS_URL_RE.sub(url_repl, new_css)
+        return new_css, new_css_files_to_visit
+
+    def process_html_file(html_file):
+        try:
+            original = html_file.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            try:
+                original = html_file.read_text(
+                    encoding="latin-1"
+                )
+            except Exception:
+                return
+        except Exception:
+            return
+
+        html_dir = html_file.parent
+        base_url = None  # No document base URL — only absolute URLs.
+
+        new_html = original
+
+        # Detect unsupported patterns for the report.
+        if SCRIPT_MODULE_RE.search(original):
+            unsupported.append({
+                "file": str(html_file.relative_to(ASSETS)),
+                "reason": "ES module <script type=\"module\">",
+                "note": "Static bundler cannot resolve module imports.",
+            })
+        if DYNAMIC_IMPORT_RE.search(original):
+            unsupported.append({
+                "file": str(html_file.relative_to(ASSETS)),
+                "reason": "dynamic import() detected",
+                "note": "Runtime module resolution is unsupported.",
+            })
+        if FETCH_RE.search(original):
+            unsupported.append({
+                "file": str(html_file.relative_to(ASSETS)),
+                "reason": "runtime fetch/axios/XHR detected",
+                "note": "Runtime network calls cannot be bundled.",
+            })
+
+        # --- srcset handling -------------------------------------
+        def srcset_repl(match):
+            value = match.group("dq") or match.group("sq") or ""
+            parts_out = []
+            changed = False
+            for part in value.split(","):
+                part_stripped = part.strip()
+                if not part_stripped:
+                    continue
+                pieces = part_stripped.split()
+                if not pieces:
+                    continue
+                candidate = pieces[0]
+                if is_external(candidate):
+                    absolute = normalize_url(candidate, "")
+                    local = fetch_and_store(
+                        absolute,
+                        referer_file=html_file,
+                        base_url_for_join="",
+                    )
+                    if local:
+                        pieces[0] = rewrite_url_to_local(
+                            candidate, local, str(html_file)
+                        )
+                        changed = True
+                parts_out.append(" ".join(pieces))
+            if not changed:
+                return match.group(0)
+            quote = '"' if match.group("dq") is not None else "'"
+            return "srcset=" + quote + ", ".join(parts_out) + quote
+
+        new_html = SRCSET_RE.sub(srcset_repl, new_html)
+
+        # --- HTML attribute URL handling --------------------------
+        def attr_repl(match):
+            attr = match.group("attr")
+            raw = (
+                match.group("dq")
+                if match.group("dq") is not None
+                else (
+                    match.group("sq")
+                    if match.group("sq") is not None
+                    else match.group("bare")
+                )
+            )
+            if not raw or not is_external(raw):
+                return match.group(0)
+            # Skip non-downloaded resources like iframe src.
+            absolute = normalize_url(raw, "")
+            local = fetch_and_store(
+                absolute,
+                referer_file=html_file,
+                base_url_for_join="",
+            )
+            if not local:
+                return match.group(0)
+            rewritten = rewrite_url_to_local(
+                raw, local, str(html_file)
+            )
+            quote = '"'
+            return '{}="{}"'.format(attr, rewritten)
+
+        new_html = HTML_URL_ATTR_RE.sub(attr_repl, new_html)
+
+        # --- <style> blocks --------------------------------------
+        def style_block_repl(match):
+            css = match.group("css")
+            new_css, _nested = process_css_text(
+                css, html_file, ""
+            )
+            return "<style>" + new_css + "</style>"
+
+        new_html = STYLE_BLOCK_RE.sub(
+            style_block_repl, new_html
+        )
+
+        # --- inline style="..." attributes -----------------------
+        def inline_style_repl(match):
+            css = match.group("dq")
+            if css is None:
+                css = match.group("sq") or ""
+            new_css, _nested = process_css_text(
+                css, html_file, ""
+            )
+            quote = '"' if match.group("dq") is not None else "'"
+            return "style=" + quote + new_css + quote
+
+        new_html = INLINE_STYLE_RE.sub(
+            inline_style_repl, new_html
+        )
+
+        if new_html != original:
+            try:
+                html_file.write_text(new_html, encoding="utf-8")
+            except Exception:
+                pass
+
+    def process_css_file(css_file, visited):
+        if css_file in visited:
+            return
+        visited.add(css_file)
+        try:
+            original = css_file.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            try:
+                original = css_file.read_text(
+                    encoding="latin-1"
+                )
+            except Exception:
+                return
+        except Exception:
+            return
+
+        referer_url = ""
+        new_css, nested = process_css_text(
+            original, css_file, referer_url
+        )
+        if new_css != original:
+            try:
+                css_file.write_text(new_css, encoding="utf-8")
+            except Exception:
+                pass
+
+        # Recurse into downloaded CSS files (they live in
+        # LOCAL_VENDOR_DIR and will be re-scanned as new CSS).
+        for child in nested:
+            if child.is_file():
+                process_css_file(child, visited)
+
+    # ============================================================
+    # Walk all HTML and CSS files under assets.
+    #
+    # FIX 4 (integrated): Skip _offline_vendor/, _bundled/,
+    # and _generated/ on the primary scan so the client-side
+    # bundler output and local Tailwind CSS are not re-processed.
+    # _bundled/ is still handled by recursive CSS processing
+    # below so its url() refs to fonts still resolve.
+    # ============================================================
+    html_files = sorted(ASSETS.rglob("*.html"))
+    css_files = sorted(ASSETS.rglob("*.css"))
+
+    # Rewrite any client-side bundler output references so the
+    # server-side bundler does not duplicate what the client
+    # already downloaded.
+    CLIENT_BUNDLED = ASSETS / "_bundled"
+
+    for html_file in html_files:
+        try:
+            rel = html_file.relative_to(ASSETS)
+        except ValueError:
+            continue
+        if rel.parts and rel.parts[0] in (
+            "_offline_vendor", "_bundled", "_generated"
+        ):
+            continue
+        try:
+            process_html_file(html_file)
+        except Exception as e:
+            failed.append({
+                "url": str(html_file),
+                "reason": "html processing error: " + str(e),
+                "referer": "",
+            })
+
+    visited_css = set()
+    for css_file in css_files:
+        try:
+            rel = css_file.relative_to(ASSETS)
+        except ValueError:
+            continue
+        if rel.parts and rel.parts[0] in (
+            "_offline_vendor", "_generated"
+        ):
+            continue
+        try:
+            process_css_file(css_file, visited_css)
+        except Exception as e:
+            failed.append({
+                "url": str(css_file),
+                "reason": "css processing error: " + str(e),
+                "referer": "",
+            })
+
+    # Process any client-bundled CSS files from the browser-side
+    # bundler so their url() references (fonts) get downloaded
+    # too. This prevents "invisible icons" caused by missing
+    # .woff2 files when the client bundler succeeds but the
+    # server bundler previously ignored _bundled/.
+    if CLIENT_BUNDLED.is_dir():
+        print("Client-side bundler output detected at _bundled/ "
+              "— including in scan.")
+        for bundled_css in CLIENT_BUNDLED.glob("*.css"):
+            try:
+                process_css_file(bundled_css, visited_css)
+            except Exception as e:
+                print("WARNING: could not process bundled CSS",
+                      bundled_css, e)
+
+    # Recursive pass on newly downloaded CSS files that weren't
+    # yet processed.
+    for entry in list(downloaded):
+        if entry.get("content_type", "").lower().startswith(
+            "text/css"
+        ):
+            child = ASSETS / entry["local_path"]
+            if child.is_file() and child not in visited_css:
+                process_css_file(child, visited_css)
+
+    # ============================================================
+    # Write the report
+    # ============================================================
+    report = {
+        "generated_at": time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+        ),
+        "total_downloaded": len(downloaded),
+        "total_failed": len(failed),
+        "total_unsupported": len(unsupported),
+        "total_downloaded_bytes": total_downloaded_bytes,
+        "total_downloaded_size_mb": round(
+            total_downloaded_bytes / (1024 * 1024), 3
+        ),
+        "downloaded_resources": downloaded,
+        "failed_resources": failed,
+        "unsupported_resources": unsupported,
+        "vendor_directory": str(
+            LOCAL_VENDOR_DIR.relative_to(ASSETS)
+        ),
+    }
+
+    try:
+        REPORT_PATH.write_text(
+            json.dumps(report, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        print("WARNING: could not write report:", e)
+
+    print("========== OFFLINE BUNDLING REPORT ==========")
+    print("Downloaded:", len(downloaded))
+    print("Failed:", len(failed))
+    print("Unsupported:", len(unsupported))
+    print("Total bytes:", total_downloaded_bytes)
+    print("Report:", REPORT_PATH)
+    for d in downloaded[:30]:
+        print("DOWNLOADED:", d["url"], "->", d["local_path"])
+    for f in failed[:30]:
+        print("FAILED:", f["url"], "->", f["reason"])
+    for u in unsupported[:20]:
+        print("UNSUPPORTED:", u["file"], "-", u["reason"])
+    print("========== OFFLINE BUNDLING END ==========")
+    PY
+# ============================================================
+# FIX 3 (NEW STEP): Verify all critical offline assets made it
+# into the APK. If Tailwind CSS is missing, if the CDN script
+# is still in index.html, or if there are zero font files, the
+# build fails HERE instead of shipping a broken APK to the user.
+# ============================================================
+- name: Verify Critical Offline Assets
+  run: |
+    set -euo pipefail
+    ASSETS="myapp/app/src/main/assets"
+
+    echo "=== Tailwind CSS ==="
+    if [ ! -s "$ASSETS/_generated/tailwind.css" ]; then
+      echo "ERROR: _generated/tailwind.css is missing or empty."
+      echo "Offline design will be broken. Aborting build."
+      exit 1
+    fi
+    wc -c "$ASSETS/_generated/tailwind.css"
+
+    echo "=== Tailwind CDN removed from APK index.html ==="
+    if grep -q "cdn.tailwindcss.com" "$ASSETS/index.html"; then
+      echo "ERROR: Tailwind CDN still present in APK index.html."
+      echo "Offline build will be broken. Aborting build."
+      exit 1
+    fi
+    echo "Tailwind CDN removed: OK"
+
+    echo "=== Font files (.woff2 / .woff / .ttf) ==="
+    WOFF_COUNT=$(find "$ASSETS" \( -name "*.woff2" -o -name "*.woff" -o -name "*.ttf" \) 2>/dev/null | wc -l)
+    echo "Font files found: $WOFF_COUNT"
+    if [ "$WOFF_COUNT" -lt 1 ]; then
+      echo "ERROR: No font files in APK assets — icons will be invisible."
+      echo "Check that _bundled/ or _offline_vendor/ contains font files."
+      echo "Aborting build."
+      exit 1
+    fi
+
+    echo "=== Font Awesome CSS sanity check ==="
+    FA_CSS=$(find "$ASSETS" -name "*.css" 2>/dev/null | xargs grep -l "font-family.*Font Awesome" 2>/dev/null | head -1 || true)
+    if [ -z "$FA_CSS" ]; then
+      echo "WARNING: No Font Awesome CSS detected in APK assets."
+      echo "Icons may still be visible if CSS is inlined, but check the report."
+    else
+      echo "Font Awesome CSS: $FA_CSS"
+    fi
+
+    echo "=== All local asset references in index.html ==="
+    grep -oE '(src|href)="[^"]*"' "$ASSETS/index.html" | grep -vE '^(src|href)="https?://' | head -20 || true
+
+    echo "ALL CRITICAL OFFLINE ASSETS VERIFIED."
+
+- name: Create Gradle Project
+  run: |
+    mkdir -p myapp/app
+
+    cat > myapp/settings.gradle <<'EOF'
+    pluginManagement {
+        repositories {
+            google()
+            mavenCentral()
+            gradlePluginPortal()
+        }
+    }
+
+    dependencyResolutionManagement {
+        repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+        repositories {
+            google()
+            mavenCentral()
+        }
+    }
+
+    rootProject.name = 'MyWebApp'
+    include ':app'
+    EOF
+
+    cat > myapp/build.gradle <<'EOF'
+    plugins {
+        id 'com.android.application' version '8.1.0' apply false
+    }
+    EOF
+
+    cat > myapp/app/build.gradle <<'EOF'
+    plugins {
+        id 'com.android.application'
+    }
+
+    android {
+        namespace 'com.app.builder'
+        compileSdk 34
+
+        defaultConfig {
+            applicationId 'com.app.builder'
+            minSdk 21
+            targetSdk 34
+            versionCode 1
+            versionName '1.0'
+        }
+    }
+    EOF
+
+    # Replace the default package settings with the user's package.
+    python3 - <<'PY'
+    import json
+    import os
+    from pathlib import Path
+
+    build_id = os.environ["BUILD_ID"]
+    config = json.loads(
+        (Path("source/.build-input") / build_id / "build-config.json")
+        .read_text(encoding="utf-8")
+    )
+
+    gradle_file = Path("myapp/app/build.gradle")
+    content = gradle_file.read_text(encoding="utf-8")
+    content = content.replace(
+        "com.app.builder",
+        config["packageName"]
+    )
+    gradle_file.write_text(content, encoding="utf-8")
+    PY
+  env:
+    BUILD_ID: ${{ github.event.client_payload.buildId }}
+
+# ============================================================
+# FIX 4 (NEW STEP): Always add androidx.webkit dependency
+# so WebViewAssetLoader can be used in MainActivity.java.
+# This runs whether AdMob is enabled or not. If AdMob is
+# enabled, the AdMob step later adds its own dependencies
+# block — both are present, no conflict.
+# ============================================================
+- name: Add androidx.webkit dependency for WebViewAssetLoader
+  run: |
+    set -euo pipefail
+    BUILD_GRADLE="myapp/app/build.gradle"
+
+    if grep -q "androidx.webkit:webkit" "$BUILD_GRADLE"; then
+      echo "androidx.webkit already present — skipping."
+      exit 0
+    fi
+
+    cat >> "$BUILD_GRADLE" <<'EOF'
+
+    dependencies {
+        implementation 'androidx.webkit:webkit:1.8.0'
+    }
+    EOF
+
+    echo "androidx.webkit:webkit:1.8.0 added to app/build.gradle."
+    echo "--- Current dependencies in build.gradle ---"
+    grep -A20 "^dependencies" "$BUILD_GRADLE" || true
+
+# ============================================================
+# Google AdMob (Google Mobile Ads SDK) — OLD DISABLED STEPS
+# Preserved from original workflow.
+# ============================================================
+- name: Configure Google Mobile Ads SDK dependency
+  if: false
+  shell: bash
+  run: |
+    set -euo pipefail
+
+    ADMOB_SDK_VERSION="23.2.0"
+    ADMOB_DEP_LINE="implementation 'com.google.android.gms:play-services-ads:${ADMOB_SDK_VERSION}'"
+
+    APP_GRADLE="myapp/app/build.gradle"
+
+    if [ ! -f "$APP_GRADLE" ]; then
+      echo "❌ Expected Gradle file not found: $APP_GRADLE"
+      exit 1
+    fi
+    echo "✅ Found app Gradle file: $APP_GRADLE"
+
+    if grep -q "com.google.android.gms:play-services-ads" "$APP_GRADLE"; then
+      echo "ℹ️ AdMob SDK dependency already present — skipping."
+    else
+      echo "➕ Adding Google Mobile Ads SDK ${ADMOB_SDK_VERSION} to ${APP_GRADLE}"
+      if grep -qE '^[[:space:]]*dependencies[[:space:]]*\{' "$APP_GRADLE"; then
+        awk -v dep="$ADMOB_DEP_LINE" '
+          BEGIN { done=0 }
+          /^[[:space:]]*dependencies[[:space:]]*\{/ && !done {
+            print
+            print "    " dep
+            done=1
+            next
           }
-
-          icon_file = None
-
-          # 1. First try the exact iconPath from build-config.json.
-          if icon_path and isinstance(icon_path, str):
-              configured_file = (source / icon_path).resolve()
-              source_resolved = source.resolve()
-
-              try:
-                  configured_file.relative_to(source_resolved)
-              except ValueError:
-                  raise SystemExit(
-                      "ERROR: Icon path is outside build directory."
-                  )
-
-              if configured_file.is_file():
-                  icon_file = configured_file
-                  print("Icon found using iconPath:", icon_file)
-
-              else:
-                  print("Configured iconPath file not found.")
-
-          # 2. Search common icon filenames if iconPath is missing.
-          if icon_file is None:
-              preferred_names = [
-                  "app-icon.png",
-                  "app-icon.jpg",
-                  "app-icon.jpeg",
-                  "app-icon.webp",
-                  "app_icon.png",
-                  "app_icon.jpg",
-                  "icon.png",
-                  "icon.jpg",
-                  "icon.jpeg",
-                  "icon.webp",
-                  "launcher.png",
-                  "launcher.jpg",
-                  "launcher.webp"
-              ]
-
-              for filename in preferred_names:
-                  candidate = source / filename
-
-                  if candidate.is_file():
-                      icon_file = candidate
-                      print("Icon found using filename:", candidate)
-                      break
-
-          # 3. Search uploaded image files outside the project folder.
-          if icon_file is None:
-              image_candidates = []
-
-              for candidate in source.rglob("*"):
-                  if not candidate.is_file():
-                      continue
-
-                  if "project" in candidate.relative_to(source).parts:
-                      continue
-
-                  if candidate.name == "build-config.json":
-                      continue
-
-                  if candidate.suffix.lower() in supported_extensions:
-                      image_candidates.append(candidate)
-
-              named_candidates = [
-                  item for item in image_candidates
-                  if "icon" in item.stem.lower()
-                  or "launcher" in item.stem.lower()
-                  or "logo" in item.stem.lower()
-              ]
-
-              if len(named_candidates) == 1:
-                  icon_file = named_candidates[0]
-
-              elif len(image_candidates) == 1:
-                  icon_file = image_candidates[0]
-
-              elif len(named_candidates) > 1:
-                  raise SystemExit(
-                      "ERROR: Multiple possible icon images found. "
-                      "Please provide a clear iconPath in build-config.json."
-                  )
-
-              elif len(image_candidates) > 1:
-                  raise SystemExit(
-                      "ERROR: Multiple images found and no clear app icon "
-                      "could be identified."
-                  )
-
-          icon_enabled = False
-
-          if icon_file is not None:
-              print("SELECTED ICON:", icon_file)
-              print("ICON EXISTS:", icon_file.is_file())
-
-              try:
-                  with Image.open(icon_file) as original:
-                      original.load()
-                      image = ImageOps.exif_transpose(original).convert("RGBA")
-
-                  if image.width < 1 or image.height < 1:
-                      raise ValueError("Invalid image dimensions.")
-
-                  print(
-                      "Original icon dimensions:",
-                      image.width,
-                      "x",
-                      image.height
-                  )
-
-                  # Make a square transparent launcher image.
-                  # This preserves the complete uploaded image.
-                  for folder, size in [
-                      ("mipmap-mdpi", 48),
-                      ("mipmap-hdpi", 72),
-                      ("mipmap-xhdpi", 96),
-                      ("mipmap-xxhdpi", 144),
-                      ("mipmap-xxxhdpi", 192)
-                  ]:
-                      target = root / "app/src/main/res" / folder
-                      target.mkdir(parents=True, exist_ok=True)
-
-                      resized = ImageOps.contain(
-                          image,
-                          (size, size),
-                          method=Image.Resampling.LANCZOS
-                      )
-
-                      canvas = Image.new(
-                          "RGBA",
-                          (size, size),
-                          (0, 0, 0, 0)
-                      )
-
-                      x = (size - resized.width) // 2
-                      y = (size - resized.height) // 2
-
-                      canvas.alpha_composite(resized, (x, y))
-
-                      output_file = target / "ic_launcher.png"
-                      canvas.save(output_file, format="PNG")
-
-                      print(
-                          "CREATED ICON:",
-                          output_file,
-                          output_file.stat().st_size,
-                          "bytes"
-                      )
-
-                  # Set both standard and round launcher icons.
-                  application.set(
-                      f"{{{android_ns}}}icon",
-                      "@mipmap/ic_launcher"
-                  )
-
-                  application.set(
-                      f"{{{android_ns}}}roundIcon",
-                      "@mipmap/ic_launcher"
-                  )
-
-                  icon_enabled = True
-
-                  print("CUSTOM ICON GENERATED SUCCESSFULLY.")
-
-              except Exception as error:
-                  raise SystemExit(
-                      "ERROR: Could not process uploaded app icon: "
-                      + str(error)
-                  )
-
-          else:
-              if icon_path:
-                  raise SystemExit(
-                      "ERROR: iconPath was provided but no valid icon "
-                      "image was found."
-                  )
-
-              print(
-                  "WARNING: No custom icon was uploaded. "
-                  "Android default icon will be used."
-              )
-
-          # Write the final manifest after setting icon attributes.
-          ET.ElementTree(manifest).write(
-              manifest_path,
-              encoding="utf-8",
-              xml_declaration=True
-          )
-
-          # Verify generated launcher icons.
-          if icon_enabled:
-              for folder in [
-                  "mipmap-mdpi",
-                  "mipmap-hdpi",
-                  "mipmap-xhdpi",
-                  "mipmap-xxhdpi",
-                  "mipmap-xxxhdpi"
-              ]:
-                  generated = (
-                      root / "app/src/main/res" / folder / "ic_launcher.png"
-                  )
-
-                  if not generated.is_file() or generated.stat().st_size == 0:
-                      raise SystemExit(
-                          "ERROR: Launcher icon missing: " + str(generated)
-                      )
-
-              check_tree = ET.parse(manifest_path)
-              check_application = check_tree.getroot().find("application")
-
-              if check_application is None:
-                  raise SystemExit("ERROR: Application element missing.")
-
-              if check_application.get(
-                  f"{{{android_ns}}}icon"
-              ) != "@mipmap/ic_launcher":
-                  raise SystemExit("ERROR: android:icon was not configured.")
-
-              if check_application.get(
-                  f"{{{android_ns}}}roundIcon"
-              ) != "@mipmap/ic_launcher":
-                  raise SystemExit(
-                      "ERROR: android:roundIcon was not configured."
-                  )
-
-              print("LAUNCHER ICON VERIFICATION PASSED.")
-
-          # Create MainActivity with Android WebView file picker support.
-          java_code = f'''package {package_name};
-
-          import android.app.Activity;
-          import android.os.Bundle;
-          import android.content.Intent;
-          import android.net.Uri;
-          import android.webkit.WebView;
-          import android.webkit.WebViewClient;
-          import android.webkit.WebChromeClient;
-          import android.webkit.WebSettings;
-          import android.webkit.ValueCallback;
-          import android.content.ActivityNotFoundException;
-
-          public class MainActivity extends Activity {{
-              private WebView webView;
-              private ValueCallback<Uri[]> filePathCallback;
-              private static final int FILE_CHOOSER_REQUEST_CODE = 1001;
-
-              @Override
-              protected void onCreate(Bundle savedInstanceState) {{
-                  super.onCreate(savedInstanceState);
-
-                  webView = new WebView(this);
-
-                  WebSettings settings = webView.getSettings();
-                  settings.setJavaScriptEnabled(true);
-                  settings.setDomStorageEnabled(true);
-                  settings.setAllowFileAccess(true);
-                  settings.setAllowContentAccess(true);
-
-                  webView.setWebViewClient(new WebViewClient());
-
-                  webView.setWebChromeClient(new WebChromeClient() {{
-                      @Override
-                      public boolean onShowFileChooser(
-                              WebView webView,
-                              ValueCallback<Uri[]> filePathCallback,
-                              FileChooserParams fileChooserParams) {{
-
-                          if (MainActivity.this.filePathCallback != null) {{
-                              MainActivity.this.filePathCallback.onReceiveValue(null);
-                              MainActivity.this.filePathCallback = null;
-                          }}
-
-                          MainActivity.this.filePathCallback = filePathCallback;
-
-                          try {{
-                              Intent intent = fileChooserParams.createIntent();
-                              startActivityForResult(
-                                  intent,
-                                  FILE_CHOOSER_REQUEST_CODE
-                              );
-                              return true;
-                          }} catch (ActivityNotFoundException exception) {{
-                              MainActivity.this.filePathCallback = null;
-                              return false;
-                          }}
-                      }}
-                  }});
-
-                  webView.loadUrl("file:///android_asset/index.html");
-                  setContentView(webView);
-              }}
-
-              @Override
-              protected void onActivityResult(
-                      int requestCode,
-                      int resultCode,
-                      Intent data) {{
-                  super.onActivityResult(requestCode, resultCode, data);
-
-                  if (requestCode == FILE_CHOOSER_REQUEST_CODE) {{
-                      if (filePathCallback == null) {{
-                          return;
-                      }}
-
-                      Uri[] results = null;
-
-                      if (resultCode == Activity.RESULT_OK && data != null) {{
-                          results = WebChromeClient.FileChooserParams.parseResult(
-                              resultCode,
-                              data
-                          );
-                      }}
-
-                      filePathCallback.onReceiveValue(results);
-                      filePathCallback = null;
-                  }}
-              }}
-
-              @Override
-              public void onBackPressed() {{
-                  if (webView != null && webView.canGoBack()) {{
-                      webView.goBack();
-                  }} else {{
-                      super.onBackPressed();
-                  }}
-              }}
-          }}
-          '''
-
-          (java_dir / "MainActivity.java").write_text(
-              java_code,
-              encoding="utf-8"
-          )
-
-          print("Project files copied successfully.")
-          print("App:", app_name)
-          print("Package:", package_name)
-          print("Custom icon enabled:", icon_enabled)
-          PY
-
-      # ============================================================
-      # OFFLINE DEPENDENCY BUNDLING SYSTEM (ADDED)
-      # Downloads external CSS / JS / fonts / icons / images
-      # referenced by HTML and CSS files, saves them locally in
-      # the APK assets, rewrites URLs to local relative paths, and
-      # writes offline-bundling-report.json.
-      # This step never fails the build on download errors — it
-      # only reports them.
-      # ============================================================
-      # ============================================================
-      # COMPILE TAILWIND LOCALLY
-      # The Tailwind Play CDN is a browser-side runtime compiler.
-      # Compile utility classes during the GitHub build instead, so
-      # the APK does not depend on a CDN or runtime network access.
-      # ============================================================
-      - name: Compile Tailwind CSS for WebView
-        run: |
-          set -euo pipefail
-          ASSETS="myapp/app/src/main/assets"
-          if [ ! -f "$ASSETS/index.html" ]; then
-            echo "ERROR: index.html not found before Tailwind compilation."
-            exit 1
-          fi
-
-          mkdir -p "$ASSETS/_generated"
-          cat > /tmp/tailwind.input.css <<'CSS'
-          @tailwind base;
-          @tailwind components;
-          @tailwind utilities;
-          CSS
-
-          cat > /tmp/tailwind.config.cjs <<'JS'
-          module.exports = {
-            content: [
-              "./myapp/app/src/main/assets/**/*.html",
-              "./myapp/app/src/main/assets/**/*.js"
-            ],
-            theme: { extend: {} },
-            plugins: []
-          };
-          JS
-
-          npx --yes tailwindcss@3.4.17 \
-            --config /tmp/tailwind.config.cjs \
-            --input /tmp/tailwind.input.css \
-            --output "$ASSETS/_generated/tailwind.css" \
-            --minify
-
-          if [ ! -s "$ASSETS/_generated/tailwind.css" ]; then
-            echo "ERROR: Tailwind CSS output is missing or empty."
-            exit 1
-          fi
-
-          echo "========== TAILWIND CSS VERIFICATION =========="
-          wc -c "$ASSETS/_generated/tailwind.css"
-          head -c 180 "$ASSETS/_generated/tailwind.css"
-          echo
-          echo "Tailwind CSS compiled and saved inside APK assets."
-          echo "==============================================="
-
-      - name: Offline Dependency Bundling
-        env:
-          PYTHONUNBUFFERED: "1"
-        run: |
-          set -uo pipefail
-          python3 - <<'PY'
-          import hashlib
-          import json
-          import os
-          import re
-          import sys
-          import time
-          import urllib.error
-          import urllib.parse
-          import urllib.request
-          from pathlib import Path
-
-          ASSETS = Path("myapp/app/src/main/assets")
-          REPORT_PATH = ASSETS / "offline-bundling-report.json"
-          LOCAL_VENDOR_DIR = ASSETS / "_offline_vendor"
-
-          DOWNLOAD_TIMEOUT = 30
-          MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024
-          MAX_RESOURCES = 500
-          USER_AGENT = (
-              "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 "
-              "(KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36"
-          )
-
-          # Mime -> extension fallback when URL has no usable suffix.
-          MIME_EXT = {
-              "text/css": ".css",
-              "text/javascript": ".js",
-              "application/javascript": ".js",
-              "application/x-javascript": ".js",
-              "image/png": ".png",
-              "image/jpeg": ".jpg",
-              "image/jpg": ".jpg",
-              "image/gif": ".gif",
-              "image/svg+xml": ".svg",
-              "image/webp": ".webp",
-              "image/x-icon": ".ico",
-              "image/vnd.microsoft.icon": ".ico",
-              "image/avif": ".avif",
-              "font/woff": ".woff",
-              "font/woff2": ".woff2",
-              "application/font-woff": ".woff",
-              "application/font-woff2": ".woff2",
-              "font/ttf": ".ttf",
-              "application/x-font-ttf": ".ttf",
-              "font/otf": ".otf",
-              "application/vnd.ms-fontobject": ".eot",
-              "video/mp4": ".mp4",
-              "video/webm": ".webm",
-              "application/json": ".json",
-          }
-
-          SAFE_EXT_RE = re.compile(r"^\.[A-Za-z0-9]{1,8}$")
-
-          downloaded = []
-          failed = []
-          unsupported = []
-          already_local = []
-          url_cache = {}
-
-          total_downloaded_bytes = 0
-
-          print("========== OFFLINE BUNDLING START ==========")
-
-          if not ASSETS.is_dir():
-              print("Assets directory not found — skipping bundling.")
-              raise SystemExit(0)
-
-          ASSETS.mkdir(parents=True, exist_ok=True)
-          LOCAL_VENDOR_DIR.mkdir(parents=True, exist_ok=True)
-
-          def safe_ext_from_url(url):
-              try:
-                  path = urllib.parse.urlparse(url).path
-              except Exception:
-                  return ""
-              suffix = Path(path).suffix.lower()
-              if suffix and SAFE_EXT_RE.match(suffix):
-                  return suffix
-              return ""
-
-          def guess_ext(url, content_type):
-              ext = safe_ext_from_url(url)
-              if ext:
-                  return ext
-              if content_type:
-                  base = content_type.split(";", 1)[0].strip().lower()
-                  if base in MIME_EXT:
-                      return MIME_EXT[base]
-              return ".bin"
-
-          def is_external(url):
-              if not url:
-                  return False
-              u = url.strip()
-              if not u:
-                  return False
-              low = u.lower()
-              if low.startswith("data:") or low.startswith("blob:"):
-                  return False
-              if low.startswith("javascript:") or low.startswith("mailto:"):
-                  return False
-              if low.startswith("#"):
-                  return False
-              if low.startswith("//"):
-                  return True
-              if low.startswith("http://") or low.startswith("https://"):
-                  return True
-              return False
-
-          def normalize_url(url, base_url):
-              if url.startswith("//"):
-                  if base_url and base_url.startswith("http://"):
-                      url = "http://" + url[2:]
-                  else:
-                      url = "https://" + url[2:]
-              try:
-                  return urllib.parse.urljoin(base_url, url)
-              except Exception:
-                  return url
-
-          def download_resource(url, referer=None):
-              """Return (bytes, content_type) or (None, error_string)."""
-              if url in url_cache:
-                  return url_cache[url]
-
-              headers = {
-                  "User-Agent": USER_AGENT,
-                  "Accept": "*/*",
-              }
-              if referer:
-                  headers["Referer"] = referer
-
-              request = urllib.request.Request(url, headers=headers)
-              try:
-                  with urllib.request.urlopen(
-                      request, timeout=DOWNLOAD_TIMEOUT
-                  ) as response:
-                      content_type = response.headers.get("Content-Type", "")
-                      chunks = []
-                      total = 0
-                      while True:
-                          chunk = response.read(65536)
-                          if not chunk:
-                              break
-                          total += len(chunk)
-                          if total > MAX_DOWNLOAD_BYTES:
-                              url_cache[url] = (
-                                  None,
-                                  "exceeds max download size"
-                              )
-                              return url_cache[url]
-                          chunks.append(chunk)
-                      data = b"".join(chunks)
-                      if not data:
-                          url_cache[url] = (None, "empty response")
-                          return url_cache[url]
-                      url_cache[url] = (data, content_type)
-                      return url_cache[url]
-              except urllib.error.HTTPError as e:
-                  url_cache[url] = (None, "HTTP " + str(e.code))
-                  return url_cache[url]
-              except urllib.error.URLError as e:
-                  url_cache[url] = (
-                      None,
-                      "URL error: " + str(e.reason)
-                  )
-                  return url_cache[url]
-              except Exception as e:
-                  url_cache[url] = (
-                      None,
-                      "Download error: " + str(e)
-                  )
-                  return url_cache[url]
-
-          def local_filename_for_url(url, content_type):
-              """Deterministic, collision-free local filename."""
-              parsed = urllib.parse.urlparse(url)
-              stem = Path(parsed.path).stem or "resource"
-              stem = re.sub(r"[^A-Za-z0-9._-]+", "_", stem)[:40]
-              if not stem:
-                  stem = "resource"
-              ext = guess_ext(url, content_type)
-              digest = hashlib.sha1(
-                  url.encode("utf-8")
-              ).hexdigest()[:10]
-              return stem + "_" + digest + ext
-
-          def rewrite_url_to_local(original, local_filename, base_url):
-              """Compute a browser-relative path from the referencing
-              file's folder (base_url is the folder of the referrer,
-              not a URL). Returns a relative string using forward slashes."""
-              # base_url here is the *file path* of the referrer.
-              # We compute relative path from its parent to the local file.
-              base_dir = Path(base_url).parent if base_url else Path(".")
-              try:
-                  rel = os.path.relpath(
-                      LOCAL_VENDOR_DIR / local_filename,
-                      base_dir
-                  ).replace(os.sep, "/")
-              except Exception:
-                  rel = "_offline_vendor/" + local_filename
-              return rel
-
-          def fetch_and_store(url, referer_file, base_url_for_join):
-              """Download URL, save to vendor dir, return local filename."""
-              global total_downloaded_bytes
-              if len(downloaded) >= MAX_RESOURCES:
-                  return None
-              data, extra = download_resource(url, referer=referer_file)
-              if data is None:
-                  failed.append({
-                      "url": url,
-                      "reason": extra,
-                      "referer": str(referer_file),
-                  })
-                  return None
-              content_type = extra
-              filename = local_filename_for_url(url, content_type)
-              target = LOCAL_VENDOR_DIR / filename
-              if not target.is_file() or target.stat().st_size == 0:
-                  try:
-                      target.write_bytes(data)
-                  except Exception as e:
-                      failed.append({
-                          "url": url,
-                          "reason": "write failed: " + str(e),
-                          "referer": str(referer_file),
-                      })
-                      return None
-                  total_downloaded_bytes += len(data)
-              entry = {
-                  "url": url,
-                  "local_path": str(target.relative_to(ASSETS)),
-                  "bytes": len(data),
-                  "content_type": content_type,
-                  "referer": str(referer_file),
-              }
-              # De-duplicate by URL
-              if not any(d["url"] == url for d in downloaded):
-                  downloaded.append(entry)
-              return filename
-
-          # ============================================================
-          # HTML scanning
-          # ============================================================
-          ATTR_NAMES_FOR_URLS = {
-              "src", "href", "poster", "data", "background", "icon",
-          }
-
-          SRC_WITHOUT_DOWNLOAD = {
-              "iframe", "frame", "object", "embed", "track",
-          }
-
-          SCRIPT_MODULE_RE = re.compile(
-              r'<script[^>]*\btype\s*=\s*["\']module["\']',
-              re.IGNORECASE,
-          )
-          DYNAMIC_IMPORT_RE = re.compile(
-              r'\bimport\s*\(\s*[\'"`]', re.IGNORECASE
-          )
-          FETCH_RE = re.compile(
-              r'\b(fetch|axios\.(get|post)|XMLHttpRequest)\s*\(', re.IGNORECASE
-          )
-
-          # Lightweight HTML attribute regex — not a full parser, but
-          # sufficient for static attribute scanning of common tags.
-          HTML_URL_ATTR_RE = re.compile(
-              r"""(?P<attr>\b(?:src|href|poster|data|background|icon))\s*=\s*"""
-              r"""(?:"(?P<dq>[^"]*)"|'(?P<sq>[^']*)'|(?P<bare>[^\s>]+))""",
-              re.IGNORECASE,
-          )
-
-          SRCSET_RE = re.compile(
-              r"""\bsrcset\s*=\s*(?:"(?P<dq>[^"]*)"|'(?P<sq>[^']*)')""",
-              re.IGNORECASE,
-          )
-
-          STYLE_BLOCK_RE = re.compile(
-              r"<style\b[^>]*>(?P<css>.*?)</style>",
-              re.DOTALL | re.IGNORECASE,
-          )
-
-          INLINE_STYLE_RE = re.compile(
-              r"""\bstyle\s*=\s*(?:"(?P<dq>[^"]*)"|'(?P<sq>[^']*)')""",
-              re.IGNORECASE,
-          )
-
-          CSS_URL_RE = re.compile(
-              r"""url\(\s*(?:"(?P<dq>[^"\)]*)"|'(?P<sq>[^'\)]*)'|(?P<bare>[^\)"'\s]+))\s*\)""",
-              re.IGNORECASE,
-          )
-
-          CSS_IMPORT_RE = re.compile(
-              r"""@import\s+(?:url\(\s*)?(?:"(?P<dq>[^"]*)"|'(?P<sq>[^']*)'|(?P<bare>[^\s\)'";]+))""",
-              re.IGNORECASE,
-          )
-
-          def extract_srcset_urls(value):
-              urls = []
-              for part in value.split(","):
-                  part = part.strip()
-                  if not part:
-                      continue
-                  pieces = part.split()
-                  if not pieces:
-                      continue
-                  urls.append(pieces[0])
-              return urls
-
-          def resolve_local_path_for_rewrite(asset_file):
-              """Return a path string used by os.path.relpath — must be
-              absolute or rooted at CWD consistently. We use the path
-              relative to CWD so relpath math is stable."""
-              return Path(os.path.relpath(asset_file, Path(".")))
-
-          def process_css_text(css_text, css_file_path, referer_url):
-              """Rewrite CSS url()/@import to local paths, download targets.
-              Returns new CSS text and list of newly created css files to
-              process recursively."""
-              new_css = css_text
-              new_css_files_to_visit = []
-
-              # @import first (before url()) so we can capture the CSS file.
-              def import_repl(match):
-                  raw = (
-                      match.group("dq")
-                      or match.group("sq")
-                      or match.group("bare")
-                  )
-                  if not raw or not is_external(raw):
-                      return match.group(0)
-                  absolute = normalize_url(raw, referer_url)
-                  local = fetch_and_store(
-                      absolute,
-                      referer_file=css_file_path,
-                      base_url_for_join=referer_url,
-                  )
-                  if not local:
-                      return match.group(0)
-                  new_css_files_to_visit.append(LOCAL_VENDOR_DIR / local)
-                  return "@import url(\"{}\")".format(
-                      rewrite_url_to_local(
-                          raw, local, str(css_file_path)
-                      )
-                  )
-
-              new_css = CSS_IMPORT_RE.sub(import_repl, new_css)
-
-              def url_repl(match):
-                  raw = (
-                      match.group("dq")
-                      or match.group("sq")
-                      or match.group("bare")
-                  )
-                  if not raw or not is_external(raw):
-                      return match.group(0)
-                  absolute = normalize_url(raw, referer_url)
-                  local = fetch_and_store(
-                      absolute,
-                      referer_file=css_file_path,
-                      base_url_for_join=referer_url,
-                  )
-                  if not local:
-                      return match.group(0)
-                  return "url(\"{}\")".format(
-                      rewrite_url_to_local(
-                          raw, local, str(css_file_path)
-                      )
-                  )
-
-              new_css = CSS_URL_RE.sub(url_repl, new_css)
-              return new_css, new_css_files_to_visit
-
-          def process_html_file(html_file):
-              try:
-                  original = html_file.read_text(encoding="utf-8")
-              except UnicodeDecodeError:
-                  try:
-                      original = html_file.read_text(
-                          encoding="latin-1"
-                      )
-                  except Exception:
-                      return
-              except Exception:
-                  return
-
-              html_dir = html_file.parent
-              base_url = None  # No document base URL — only absolute URLs.
-
-              new_html = original
-
-              # Detect unsupported patterns for the report.
-              if SCRIPT_MODULE_RE.search(original):
-                  unsupported.append({
-                      "file": str(html_file.relative_to(ASSETS)),
-                      "reason": "ES module <script type=\"module\">",
-                      "note": "Static bundler cannot resolve module imports.",
-                  })
-              if DYNAMIC_IMPORT_RE.search(original):
-                  unsupported.append({
-                      "file": str(html_file.relative_to(ASSETS)),
-                      "reason": "dynamic import() detected",
-                      "note": "Runtime module resolution is unsupported.",
-                  })
-              if FETCH_RE.search(original):
-                  unsupported.append({
-                      "file": str(html_file.relative_to(ASSETS)),
-                      "reason": "runtime fetch/axios/XHR detected",
-                      "note": "Runtime network calls cannot be bundled.",
-                  })
-
-              # --- srcset handling -------------------------------------
-              def srcset_repl(match):
-                  value = match.group("dq") or match.group("sq") or ""
-                  parts_out = []
-                  changed = False
-                  for part in value.split(","):
-                      part_stripped = part.strip()
-                      if not part_stripped:
-                          continue
-                      pieces = part_stripped.split()
-                      if not pieces:
-                          continue
-                      candidate = pieces[0]
-                      if is_external(candidate):
-                          absolute = normalize_url(candidate, "")
-                          local = fetch_and_store(
-                              absolute,
-                              referer_file=html_file,
-                              base_url_for_join="",
-                          )
-                          if local:
-                              pieces[0] = rewrite_url_to_local(
-                                  candidate, local, str(html_file)
-                              )
-                              changed = True
-                      parts_out.append(" ".join(pieces))
-                  if not changed:
-                      return match.group(0)
-                  quote = '"' if match.group("dq") is not None else "'"
-                  return "srcset=" + quote + ", ".join(parts_out) + quote
-
-              new_html = SRCSET_RE.sub(srcset_repl, new_html)
-
-              # --- HTML attribute URL handling --------------------------
-              def attr_repl(match):
-                  attr = match.group("attr")
-                  raw = (
-                      match.group("dq")
-                      if match.group("dq") is not None
-                      else (
-                          match.group("sq")
-                          if match.group("sq") is not None
-                          else match.group("bare")
-                      )
-                  )
-                  if not raw or not is_external(raw):
-                      return match.group(0)
-                  # Skip non-downloaded resources like iframe src.
-                  absolute = normalize_url(raw, "")
-                  local = fetch_and_store(
-                      absolute,
-                      referer_file=html_file,
-                      base_url_for_join="",
-                  )
-                  if not local:
-                      return match.group(0)
-                  rewritten = rewrite_url_to_local(
-                      raw, local, str(html_file)
-                  )
-                  quote = '"'
-                  return '{}="{}"'.format(attr, rewritten)
-
-              new_html = HTML_URL_ATTR_RE.sub(attr_repl, new_html)
-
-              # --- <style> blocks --------------------------------------
-              def style_block_repl(match):
-                  css = match.group("css")
-                  new_css, _nested = process_css_text(
-                      css, html_file, ""
-                  )
-                  return "<style>" + new_css + "</style>"
-
-              new_html = STYLE_BLOCK_RE.sub(
-                  style_block_repl, new_html
-              )
-
-              # --- inline style="..." attributes -----------------------
-              def inline_style_repl(match):
-                  css = match.group("dq")
-                  if css is None:
-                      css = match.group("sq") or ""
-                  new_css, _nested = process_css_text(
-                      css, html_file, ""
-                  )
-                  quote = '"' if match.group("dq") is not None else "'"
-                  return "style=" + quote + new_css + quote
-
-              new_html = INLINE_STYLE_RE.sub(
-                  inline_style_repl, new_html
-              )
-
-              if new_html != original:
-                  try:
-                      html_file.write_text(new_html, encoding="utf-8")
-                  except Exception:
-                      pass
-
-          def process_css_file(css_file, visited):
-              if css_file in visited:
-                  return
-              visited.add(css_file)
-              try:
-                  original = css_file.read_text(encoding="utf-8")
-              except UnicodeDecodeError:
-                  try:
-                      original = css_file.read_text(
-                          encoding="latin-1"
-                      )
-                  except Exception:
-                      return
-              except Exception:
-                  return
-
-              referer_url = ""
-              new_css, nested = process_css_text(
-                  original, css_file, referer_url
-              )
-              if new_css != original:
-                  try:
-                      css_file.write_text(new_css, encoding="utf-8")
-                  except Exception:
-                      pass
-
-              # Recurse into downloaded CSS files (they live in
-              # LOCAL_VENDOR_DIR and will be re-scanned as new CSS).
-              for child in nested:
-                  if child.is_file():
-                      process_css_file(child, visited)
-
-          # ============================================================
-          # Walk all HTML and CSS files under assets (excluding vendor
-          # dir the first pass; vendor CSS is handled by recursion).
-          # ============================================================
-          html_files = sorted(ASSETS.rglob("*.html"))
-          css_files = sorted(ASSETS.rglob("*.css"))
-
-          for html_file in html_files:
-              try:
-                  rel = html_file.relative_to(ASSETS)
-              except ValueError:
-                  continue
-              if rel.parts and rel.parts[0] == "_offline_vendor":
-                  continue
-              try:
-                  process_html_file(html_file)
-              except Exception as e:
-                  failed.append({
-                      "url": str(html_file),
-                      "reason": "html processing error: " + str(e),
-                      "referer": "",
-                  })
-
-          visited_css = set()
-          for css_file in css_files:
-              try:
-                  rel = css_file.relative_to(ASSETS)
-              except ValueError:
-                  continue
-              if rel.parts and rel.parts[0] == "_offline_vendor":
-                  continue
-              try:
-                  process_css_file(css_file, visited_css)
-              except Exception as e:
-                  failed.append({
-                      "url": str(css_file),
-                      "reason": "css processing error: " + str(e),
-                      "referer": "",
-                  })
-
-          # Recursive pass on newly downloaded CSS files that weren't
-          # yet processed.
-          for entry in list(downloaded):
-              if entry.get("content_type", "").lower().startswith(
-                  "text/css"
-              ):
-                  child = ASSETS / entry["local_path"]
-                  if child.is_file() and child not in visited_css:
-                      process_css_file(child, visited_css)
-
-          # ============================================================
-          # Write the report
-          # ============================================================
-          report = {
-              "generated_at": time.strftime(
-                  "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
-              ),
-              "total_downloaded": len(downloaded),
-              "total_failed": len(failed),
-              "total_unsupported": len(unsupported),
-              "total_downloaded_bytes": total_downloaded_bytes,
-              "total_downloaded_size_mb": round(
-                  total_downloaded_bytes / (1024 * 1024), 3
-              ),
-              "downloaded_resources": downloaded,
-              "failed_resources": failed,
-              "unsupported_resources": unsupported,
-              "vendor_directory": str(
-                  LOCAL_VENDOR_DIR.relative_to(ASSETS)
-              ),
-          }
-
-          try:
-              REPORT_PATH.write_text(
-                  json.dumps(report, indent=2, ensure_ascii=False),
-                  encoding="utf-8",
-              )
-          except Exception as e:
-              print("WARNING: could not write report:", e)
-
-          print("========== OFFLINE BUNDLING REPORT ==========")
-          print("Downloaded:", len(downloaded))
-          print("Failed:", len(failed))
-          print("Unsupported:", len(unsupported))
-          print("Total bytes:", total_downloaded_bytes)
-          print("Report:", REPORT_PATH)
-          for d in downloaded[:30]:
-              print("DOWNLOADED:", d["url"], "->", d["local_path"])
-          for f in failed[:30]:
-              print("FAILED:", f["url"], "->", f["reason"])
-          for u in unsupported[:20]:
-              print("UNSUPPORTED:", u["file"], "-", u["reason"])
-          print("========== OFFLINE BUNDLING END ==========")
-          PY
-
-      - name: Create Gradle Project
-        run: |
-          mkdir -p myapp/app
-
-          cat > myapp/settings.gradle <<'EOF'
-          pluginManagement {
-              repositories {
-                  google()
-                  mavenCentral()
-                  gradlePluginPortal()
-              }
-          }
-
-          dependencyResolutionManagement {
-              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
-              repositories {
-                  google()
-                  mavenCentral()
-              }
-          }
-
-          rootProject.name = 'MyWebApp'
-          include ':app'
-          EOF
-
-          cat > myapp/build.gradle <<'EOF'
-          plugins {
-              id 'com.android.application' version '8.1.0' apply false
-          }
-          EOF
-
-          cat > myapp/app/build.gradle <<'EOF'
-          plugins {
-              id 'com.android.application'
-          }
-
-          android {
-              namespace 'com.app.builder'
-              compileSdk 34
-
-              defaultConfig {
-                  applicationId 'com.app.builder'
-                  minSdk 21
-                  targetSdk 34
-                  versionCode 1
-                  versionName '1.0'
-              }
-          }
-          EOF
-
-          # Replace the default package settings with the user's package.
-          python3 - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-
-          build_id = os.environ["BUILD_ID"]
-          config = json.loads(
-              (Path("source/.build-input") / build_id / "build-config.json")
-              .read_text(encoding="utf-8")
-          )
-
-          gradle_file = Path("myapp/app/build.gradle")
-          content = gradle_file.read_text(encoding="utf-8")
-          content = content.replace(
-              "com.app.builder",
-              config["packageName"]
-          )
-          gradle_file.write_text(content, encoding="utf-8")
-          PY
-        env:
-          BUILD_ID: ${{ github.event.client_payload.buildId }}
-
-      # ============================================================
-      # Google AdMob (Google Mobile Ads SDK) — OLD DISABLED STEPS
-      # Preserved from original workflow.
-      # ============================================================
-      - name: Configure Google Mobile Ads SDK dependency
-        if: false
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          ADMOB_SDK_VERSION="23.2.0"
-          ADMOB_DEP_LINE="implementation 'com.google.android.gms:play-services-ads:${ADMOB_SDK_VERSION}'"
-
-          APP_GRADLE="myapp/app/build.gradle"
-
-          if [ ! -f "$APP_GRADLE" ]; then
-            echo "❌ Expected Gradle file not found: $APP_GRADLE"
-            exit 1
-          fi
-          echo "✅ Found app Gradle file: $APP_GRADLE"
-
-          if grep -q "com.google.android.gms:play-services-ads" "$APP_GRADLE"; then
-            echo "ℹ️ AdMob SDK dependency already present — skipping."
-          else
-            echo "➕ Adding Google Mobile Ads SDK ${ADMOB_SDK_VERSION} to ${APP_GRADLE}"
-            if grep -qE '^[[:space:]]*dependencies[[:space:]]*\{' "$APP_GRADLE"; then
-              awk -v dep="$ADMOB_DEP_LINE" '
-                BEGIN { done=0 }
-                /^[[:space:]]*dependencies[[:space:]]*\{/ && !done {
-                  print
-                  print "    " dep
-                  done=1
-                  next
+          { print }
+        ' "$APP_GRADLE" > "$APP_GRADLE.tmp" && mv "$APP_GRADLE.tmp" "$APP_GRADLE"
+      else
+        printf '\n\ndependencies {\n    %s\n}\n' "$ADMOB_DEP_LINE" >> "$APP_GRADLE"
+      fi
+    fi
+
+    echo "🔧 Ensuring Google Maven repository..."
+    SETTINGS_GRADLE="myapp/settings.gradle"
+    if grep -qE 'google\(\)|maven\.google\.com' "$SETTINGS_GRADLE"; then
+      echo "ℹ️ Google Maven repo already present."
+    else
+      echo "➕ Adding google() to repositories."
+      awk '
+        BEGIN { done=0 }
+        /repositories[[:space:]]*\{/ && !done {
+          print
+          print "            google()"
+          done=1
+          next
+        }
+        { print }
+      ' "$SETTINGS_GRADLE" > "$SETTINGS_GRADLE.tmp" && mv "$SETTINGS_GRADLE.tmp" "$SETTINGS_GRADLE"
+    fi
+
+    echo "✅ Old AdMob SDK configuration step completed."
+
+- name: Verify AdMob SDK configuration
+  if: false
+  shell: bash
+  run: |
+    set -euo pipefail
+    echo "🔎 Verifying AdMob SDK dependency and Google Maven repo..."
+    FOUND_DEP=$(grep -R "com.google.android.gms:play-services-ads" --include='build.gradle' myapp || true)
+    echo "--- AdMob dependency lines ---"
+    echo "${FOUND_DEP:-<none>}"
+    FOUND_REPO=$(grep -R -E 'google\(\)|maven\.google\.com' --include='settings.gradle' --include='build.gradle' myapp || true)
+    echo "--- Google Maven repo lines ---"
+    echo "${FOUND_REPO:-<none>}"
+    if [ -z "$FOUND_DEP" ]; then
+      echo "❌ AdMob SDK dependency was not added!"
+      exit 1
+    fi
+    if [ -z "$FOUND_REPO" ]; then
+      echo "❌ Google Maven repo not found!"
+      exit 1
+    fi
+    echo "✅ Verification passed."
+
+# ============================================================
+# NEW CONDITIONAL ADMOB INTEGRATION
+# Runs only when admob.config.json exists and enabled is true.
+# ============================================================
+- name: Configure AdMob SDK and Android Java Bridge
+  shell: bash
+  run: |
+    set -euo pipefail
+
+    ASSET_CONFIG="myapp/app/src/main/assets/admob.config.json"
+
+    if [ ! -f "$ASSET_CONFIG" ]; then
+      echo "AdMob config not found. Building without AdMob."
+      exit 0
+    fi
+
+    ENABLED=$(python3 -c "import json; print(str(json.load(open('$ASSET_CONFIG')).get('enabled', False)).lower())")
+
+    if [ "$ENABLED" != "true" ]; then
+      echo "AdMob is disabled. Building without AdMob SDK."
+      exit 0
+    fi
+
+    echo "AdMob enabled. Configuring Google Mobile Ads SDK."
+
+    python3 - <<'PY'
+    import json
+    import os
+    import re
+    from pathlib import Path
+    import xml.etree.ElementTree as ET
+
+    config_path = Path("myapp/app/src/main/assets/admob.config.json")
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+
+    app_id = config.get("appId", "").strip()
+
+    if not app_id:
+        raise SystemExit("ERROR: AdMob App ID is missing.")
+
+    if not re.fullmatch(r"ca-app-pub-[0-9]+~[0-9]+", app_id):
+        raise SystemExit("ERROR: Invalid AdMob App ID format.")
+
+    android_ns = "http://schemas.android.com/apk/res/android"
+    manifest_path = Path("myapp/app/src/main/AndroidManifest.xml")
+
+    ET.register_namespace("android", android_ns)
+
+    tree = ET.parse(manifest_path)
+    root = tree.getroot()
+    application = root.find("application")
+
+    if application is None:
+        raise SystemExit("ERROR: Android application element not found.")
+
+    for item in list(application):
+        if item.tag == "meta-data" and item.get(
+            f"{{{android_ns}}}name"
+        ) == "com.google.android.gms.ads.APPLICATION_ID":
+            application.remove(item)
+
+    metadata = ET.SubElement(application, "meta-data")
+    metadata.set(
+        f"{{{android_ns}}}name",
+        "com.google.android.gms.ads.APPLICATION_ID"
+    )
+    metadata.set(
+        f"{{{android_ns}}}value",
+        app_id
+    )
+
+    tree.write(
+        manifest_path,
+        encoding="utf-8",
+        xml_declaration=True
+    )
+
+    print("AdMob App ID added to AndroidManifest.xml.")
+
+    package_name = root.get("package")
+    java_dir = Path("myapp/app/src/main/java") / Path(
+        *package_name.split(".")
+    )
+
+    main_activity = java_dir / "MainActivity.java"
+    source = main_activity.read_text(encoding="utf-8")
+
+    bridge_line = (
+        'webView.addJavascriptInterface('
+        'new AdMobBridge(this, webView), "AndroidAds");'
+    )
+
+    if "new AdMobBridge(this, webView)" not in source:
+        # FIX 1 COMPATIBILITY: Inject the bridge BEFORE the
+        # final loadUrl call, whether it uses file:// (old) or
+        # https://appassets.androidplatform.net (new). We use
+        # the new URL as the anchor since that's what the
+        # patched MainActivity uses.
+        anchor_new = 'webView.loadUrl("https://appassets.androidplatform.net/assets/index.html");'
+        anchor_old = 'webView.loadUrl("file:///android_asset/index.html");'
+
+        if anchor_new in source:
+            source = source.replace(
+                anchor_new,
+                bridge_line + '\n                  ' + anchor_new
+            )
+        elif anchor_old in source:
+            source = source.replace(
+                anchor_old,
+                bridge_line + '\n                  ' + anchor_old
+            )
+        else:
+            raise SystemExit(
+                "ERROR: Could not find webView.loadUrl call to "
+                "inject AdMobBridge."
+            )
+
+    main_activity.write_text(source, encoding="utf-8")
+
+    bridge_code = r'''
+    package PACKAGE_NAME;
+
+    import android.app.Activity;
+    import android.graphics.Color;
+    import android.view.Gravity;
+    import android.view.View;
+    import android.view.ViewGroup;
+    import android.widget.FrameLayout;
+    import android.widget.TextView;
+    import android.webkit.JavascriptInterface;
+    import android.webkit.WebView;
+
+    import com.google.android.gms.ads.AdRequest;
+    import com.google.android.gms.ads.AdSize;
+    import com.google.android.gms.ads.AdView;
+    import com.google.android.gms.ads.MobileAds;
+    import com.google.android.gms.ads.LoadAdError;
+    import com.google.android.gms.ads.FullScreenContentCallback;
+    import com.google.android.gms.ads.interstitial.InterstitialAd;
+    import com.google.android.gms.ads.interstitial.InterstitialAdLoadCallback;
+    import com.google.android.gms.ads.rewarded.RewardedAd;
+    import com.google.android.gms.ads.rewarded.RewardedAdLoadCallback;
+    import com.google.android.gms.ads.rewarded.RewardItem;
+    import com.google.android.gms.ads.nativead.NativeAd;
+    import com.google.android.gms.ads.nativead.NativeAdView;
+    import com.google.android.gms.ads.nativead.NativeAdOptions;
+    import com.google.android.gms.ads.nativead.NativeAd.OnNativeAdLoadedListener;
+    import com.google.android.gms.ads.AdListener;
+    import com.google.android.gms.ads.AdLoader;
+    import com.google.android.gms.ads.appopen.AppOpenAd;
+    import com.google.android.gms.ads.appopen.AppOpenAd.AppOpenAdLoadCallback;
+
+    import org.json.JSONObject;
+
+    public class AdMobBridge {
+        private final Activity activity;
+        private final WebView webView;
+
+        private String bannerId = "";
+        private String interstitialId = "";
+        private String rewardedId = "";
+        private String nativeId = "";
+        private String appOpenId = "";
+
+        private AdView bannerView;
+        private InterstitialAd interstitialAd;
+        private RewardedAd rewardedAd;
+        private NativeAd nativeAd;
+        private AppOpenAd appOpenAd;
+
+        private boolean initialized = false;
+        private boolean appOpenShown = false;
+
+        public AdMobBridge(Activity activity, WebView webView) {
+            this.activity = activity;
+            this.webView = webView;
+        }
+
+        @JavascriptInterface
+        public void configure(String json) {
+            try {
+                JSONObject cfg = new JSONObject(json);
+
+                bannerId = cfg.optString("bannerId", "");
+                interstitialId = cfg.optString("interstitialId", "");
+                rewardedId = cfg.optString("rewardedId", "");
+                nativeId = cfg.optString("nativeId", "");
+                appOpenId = cfg.optString("appOpenId", "");
+
+                activity.runOnUiThread(() -> {
+                    if (initialized) return;
+
+                    initialized = true;
+
+                    MobileAds.initialize(activity, status -> {
+                        loadInterstitial();
+                        loadRewarded();
+                        loadNative();
+                        loadAppOpen();
+                    });
+                });
+
+            } catch (Exception e) {
+                android.util.Log.e("AdMobBridge", "Config error", e);
+            }
+        }
+
+        @JavascriptInterface
+        public void initialize() {
+            // Initialization is performed by configure().
+        }
+
+        @JavascriptInterface
+        public boolean isReady() {
+            return initialized;
+        }
+
+        @JavascriptInterface
+        public void showBanner() {
+            activity.runOnUiThread(() -> {
+                if (bannerId.isEmpty()) return;
+
+                if (bannerView != null) {
+                    bannerView.setVisibility(View.VISIBLE);
+                    return;
                 }
-                { print }
-              ' "$APP_GRADLE" > "$APP_GRADLE.tmp" && mv "$APP_GRADLE.tmp" "$APP_GRADLE"
-            else
-              printf '\n\ndependencies {\n    %s\n}\n' "$ADMOB_DEP_LINE" >> "$APP_GRADLE"
-            fi
-          fi
-
-          echo "🔧 Ensuring Google Maven repository..."
-          SETTINGS_GRADLE="myapp/settings.gradle"
-          if grep -qE 'google\(\)|maven\.google\.com' "$SETTINGS_GRADLE"; then
-            echo "ℹ️ Google Maven repo already present."
-          else
-            echo "➕ Adding google() to repositories."
-            awk '
-              BEGIN { done=0 }
-              /repositories[[:space:]]*\{/ && !done {
-                print
-                print "            google()"
-                done=1
-                next
-              }
-              { print }
-            ' "$SETTINGS_GRADLE" > "$SETTINGS_GRADLE.tmp" && mv "$SETTINGS_GRADLE.tmp" "$SETTINGS_GRADLE"
-          fi
-
-          echo "✅ Old AdMob SDK configuration step completed."
-
-      - name: Verify AdMob SDK configuration
-        if: false
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "🔎 Verifying AdMob SDK dependency and Google Maven repo..."
-          FOUND_DEP=$(grep -R "com.google.android.gms:play-services-ads" --include='build.gradle' myapp || true)
-          echo "--- AdMob dependency lines ---"
-          echo "${FOUND_DEP:-<none>}"
-          FOUND_REPO=$(grep -R -E 'google\(\)|maven\.google\.com' --include='settings.gradle' --include='build.gradle' myapp || true)
-          echo "--- Google Maven repo lines ---"
-          echo "${FOUND_REPO:-<none>}"
-          if [ -z "$FOUND_DEP" ]; then
-            echo "❌ AdMob SDK dependency was not added!"
-            exit 1
-          fi
-          if [ -z "$FOUND_REPO" ]; then
-            echo "❌ Google Maven repo not found!"
-            exit 1
-          fi
-          echo "✅ Verification passed."
-
-      # ============================================================
-      # NEW CONDITIONAL ADMOB INTEGRATION
-      # Runs only when admob.config.json exists and enabled is true.
-      # ============================================================
-      - name: Configure AdMob SDK and Android Java Bridge
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          ASSET_CONFIG="myapp/app/src/main/assets/admob.config.json"
-
-          if [ ! -f "$ASSET_CONFIG" ]; then
-            echo "AdMob config not found. Building without AdMob."
-            exit 0
-          fi
-
-          ENABLED=$(python3 -c "import json; print(str(json.load(open('$ASSET_CONFIG')).get('enabled', False)).lower())")
-
-          if [ "$ENABLED" != "true" ]; then
-            echo "AdMob is disabled. Building without AdMob SDK."
-            exit 0
-          fi
-
-          echo "AdMob enabled. Configuring Google Mobile Ads SDK."
-
-          python3 - <<'PY'
-          import json
-          import os
-          import re
-          from pathlib import Path
-          import xml.etree.ElementTree as ET
-
-          config_path = Path("myapp/app/src/main/assets/admob.config.json")
-          config = json.loads(config_path.read_text(encoding="utf-8"))
-
-          app_id = config.get("appId", "").strip()
-
-          if not app_id:
-              raise SystemExit("ERROR: AdMob App ID is missing.")
-
-          if not re.fullmatch(r"ca-app-pub-[0-9]+~[0-9]+", app_id):
-              raise SystemExit("ERROR: Invalid AdMob App ID format.")
-
-          android_ns = "http://schemas.android.com/apk/res/android"
-          manifest_path = Path("myapp/app/src/main/AndroidManifest.xml")
-
-          ET.register_namespace("android", android_ns)
-
-          tree = ET.parse(manifest_path)
-          root = tree.getroot()
-          application = root.find("application")
-
-          if application is None:
-              raise SystemExit("ERROR: Android application element not found.")
-
-          for item in list(application):
-              if item.tag == "meta-data" and item.get(
-                  f"{{{android_ns}}}name"
-              ) == "com.google.android.gms.ads.APPLICATION_ID":
-                  application.remove(item)
-
-          metadata = ET.SubElement(application, "meta-data")
-          metadata.set(
-              f"{{{android_ns}}}name",
-              "com.google.android.gms.ads.APPLICATION_ID"
-          )
-          metadata.set(
-              f"{{{android_ns}}}value",
-              app_id
-          )
-
-          tree.write(
-              manifest_path,
-              encoding="utf-8",
-              xml_declaration=True
-          )
-
-          print("AdMob App ID added to AndroidManifest.xml.")
-
-          package_name = root.get("package")
-          java_dir = Path("myapp/app/src/main/java") / Path(
-              *package_name.split(".")
-          )
-
-          main_activity = java_dir / "MainActivity.java"
-          source = main_activity.read_text(encoding="utf-8")
-
-          bridge_line = (
-              'webView.addJavascriptInterface('
-              'new AdMobBridge(this, webView), "AndroidAds");'
-          )
-
-          if "new AdMobBridge(this, webView)" not in source:
-              source = source.replace(
-                  'webView.loadUrl("file:///android_asset/index.html");',
-                  bridge_line + '\n                  '
-                  'webView.loadUrl("file:///android_asset/index.html");'
-              )
-
-          main_activity.write_text(source, encoding="utf-8")
-
-          bridge_code = r'''
-          package PACKAGE_NAME;
-
-          import android.app.Activity;
-          import android.graphics.Color;
-          import android.view.Gravity;
-          import android.view.View;
-          import android.view.ViewGroup;
-          import android.widget.FrameLayout;
-          import android.widget.TextView;
-          import android.webkit.JavascriptInterface;
-          import android.webkit.WebView;
-
-          import com.google.android.gms.ads.AdRequest;
-          import com.google.android.gms.ads.AdSize;
-          import com.google.android.gms.ads.AdView;
-          import com.google.android.gms.ads.MobileAds;
-          import com.google.android.gms.ads.LoadAdError;
-          import com.google.android.gms.ads.FullScreenContentCallback;
-          import com.google.android.gms.ads.interstitial.InterstitialAd;
-          import com.google.android.gms.ads.interstitial.InterstitialAdLoadCallback;
-          import com.google.android.gms.ads.rewarded.RewardedAd;
-          import com.google.android.gms.ads.rewarded.RewardedAdLoadCallback;
-          import com.google.android.gms.ads.rewarded.RewardItem;
-          import com.google.android.gms.ads.nativead.NativeAd;
-          import com.google.android.gms.ads.nativead.NativeAdView;
-          import com.google.android.gms.ads.nativead.NativeAdOptions;
-          import com.google.android.gms.ads.nativead.NativeAd.OnNativeAdLoadedListener;
-          import com.google.android.gms.ads.AdListener;
-          import com.google.android.gms.ads.AdLoader;
-          import com.google.android.gms.ads.appopen.AppOpenAd;
-          import com.google.android.gms.ads.appopen.AppOpenAd.AppOpenAdLoadCallback;
-
-          import org.json.JSONObject;
-
-          public class AdMobBridge {
-              private final Activity activity;
-              private final WebView webView;
-
-              private String bannerId = "";
-              private String interstitialId = "";
-              private String rewardedId = "";
-              private String nativeId = "";
-              private String appOpenId = "";
-
-              private AdView bannerView;
-              private InterstitialAd interstitialAd;
-              private RewardedAd rewardedAd;
-              private NativeAd nativeAd;
-              private AppOpenAd appOpenAd;
-
-              private boolean initialized = false;
-              private boolean appOpenShown = false;
-
-              public AdMobBridge(Activity activity, WebView webView) {
-                  this.activity = activity;
-                  this.webView = webView;
-              }
-
-              @JavascriptInterface
-              public void configure(String json) {
-                  try {
-                      JSONObject cfg = new JSONObject(json);
-
-                      bannerId = cfg.optString("bannerId", "");
-                      interstitialId = cfg.optString("interstitialId", "");
-                      rewardedId = cfg.optString("rewardedId", "");
-                      nativeId = cfg.optString("nativeId", "");
-                      appOpenId = cfg.optString("appOpenId", "");
-
-                      activity.runOnUiThread(() -> {
-                          if (initialized) return;
-
-                          initialized = true;
-
-                          MobileAds.initialize(activity, status -> {
-                              loadInterstitial();
-                              loadRewarded();
-                              loadNative();
-                              loadAppOpen();
-                          });
-                      });
-
-                  } catch (Exception e) {
-                      android.util.Log.e("AdMobBridge", "Config error", e);
-                  }
-              }
-
-              @JavascriptInterface
-              public void initialize() {
-                  // Initialization is performed by configure().
-              }
-
-              @JavascriptInterface
-              public boolean isReady() {
-                  return initialized;
-              }
-
-              @JavascriptInterface
-              public void showBanner() {
-                  activity.runOnUiThread(() -> {
-                      if (bannerId.isEmpty()) return;
-
-                      if (bannerView != null) {
-                          bannerView.setVisibility(View.VISIBLE);
-                          return;
-                      }
-
-                      bannerView = new AdView(activity);
-                      bannerView.setAdUnitId(bannerId);
-                      bannerView.setAdSize(AdSize.BANNER);
-
-                      FrameLayout.LayoutParams params =
-                          new FrameLayout.LayoutParams(
-                              ViewGroup.LayoutParams.MATCH_PARENT,
-                              ViewGroup.LayoutParams.WRAP_CONTENT,
-                              Gravity.BOTTOM
-                          );
-
-                      activity.addContentView(bannerView, params);
-                      bannerView.loadAd(new AdRequest.Builder().build());
-                  });
-              }
-
-              @JavascriptInterface
-              public void hideBanner() {
-                  activity.runOnUiThread(() -> {
-                      if (bannerView != null) {
-                          bannerView.setVisibility(View.GONE);
-                      }
-                  });
-              }
-
-              private void loadInterstitial() {
-                  if (interstitialId.isEmpty()) return;
-
-                  InterstitialAd.load(
-                      activity,
-                      interstitialId,
-                      new AdRequest.Builder().build(),
-                      new InterstitialAdLoadCallback() {
-                          @Override
-                          public void onAdLoaded(InterstitialAd ad) {
-                              interstitialAd = ad;
-                          }
-
-                          @Override
-                          public void onAdFailedToLoad(LoadAdError error) {
-                              interstitialAd = null;
-                          }
-                      }
-                  );
-              }
-
-              @JavascriptInterface
-              public void showInterstitial() {
-                  activity.runOnUiThread(() -> {
-                      if (interstitialAd == null) {
-                          loadInterstitial();
-                          return;
-                      }
-
-                      interstitialAd.setFullScreenContentCallback(
-                          new FullScreenContentCallback() {
-                              @Override
-                              public void onAdDismissedFullScreenContent() {
-                                  interstitialAd = null;
-                                  loadInterstitial();
-                              }
-
-                              @Override
-                              public void onAdFailedToShowFullScreenContent(
-                                      com.google.android.gms.ads.AdError error) {
-                                  interstitialAd = null;
-                                  loadInterstitial();
-                              }
-                          }
-                      );
-
-                      interstitialAd.show(activity);
-                  });
-              }
-
-              private void loadRewarded() {
-                  if (rewardedId.isEmpty()) return;
-
-                  RewardedAd.load(
-                      activity,
-                      rewardedId,
-                      new AdRequest.Builder().build(),
-                      new RewardedAdLoadCallback() {
-                          @Override
-                          public void onAdLoaded(RewardedAd ad) {
-                              rewardedAd = ad;
-                          }
-
-                          @Override
-                          public void onAdFailedToLoad(LoadAdError error) {
-                              rewardedAd = null;
-                          }
-                      }
-                  );
-              }
-
-              @JavascriptInterface
-              public void showRewarded() {
-                  activity.runOnUiThread(() -> {
-                      if (rewardedAd == null) {
-                          loadRewarded();
-                          return;
-                      }
-
-                      rewardedAd.setFullScreenContentCallback(
-                          new FullScreenContentCallback() {
-                              @Override
-                              public void onAdDismissedFullScreenContent() {
-                                  rewardedAd = null;
-                                  loadRewarded();
-                              }
-                          }
-                      );
-
-                      rewardedAd.show(activity, rewardItem -> {
-                          int amount = rewardItem.getAmount();
-                          String type = rewardItem.getType();
-
-                          webView.post(() -> webView.evaluateJavascript(
-                              "if(window.onAdRewardEarned){"
-                              + "window.onAdRewardEarned("
-                              + amount + ",'"
-                              + type.replace("'", "") + "');}",
-                              null
-                          ));
-                      });
-                  });
-              }
-
-              private void loadNative() {
-                  if (nativeId.isEmpty()) return;
-
-                  AdLoader loader = new AdLoader.Builder(activity, nativeId)
-                      .forNativeAd(ad -> {
-                          if (nativeAd != null) {
-                              nativeAd.destroy();
-                          }
-                          nativeAd = ad;
-                      })
-                      .withNativeAdOptions(new NativeAdOptions.Builder().build())
-                      .withAdListener(new AdListener() {
-                          @Override
-                          public void onAdFailedToLoad(LoadAdError error) {
-                              nativeAd = null;
-                          }
-                      })
-                      .build();
-
-                  loader.loadAd(new AdRequest.Builder().build());
-              }
-
-              @JavascriptInterface
-              public void showNative() {
-                  activity.runOnUiThread(() -> {
-                      if (nativeAd == null) {
-                          loadNative();
-                          return;
-                      }
-
-                      NativeAdView adView = new NativeAdView(activity);
-                      FrameLayout container = new FrameLayout(activity);
-                      container.setBackgroundColor(Color.WHITE);
-                      container.setPadding(12, 8, 12, 8);
-
-                      TextView headline = new TextView(activity);
-                      headline.setTextColor(Color.BLACK);
-                      headline.setTextSize(16);
-                      headline.setMaxLines(2);
-
-                      TextView body = new TextView(activity);
-                      body.setTextColor(Color.DKGRAY);
-                      body.setTextSize(13);
-
-                      TextView button = new TextView(activity);
-                      button.setTextColor(Color.WHITE);
-                      button.setBackgroundColor(Color.rgb(30, 100, 210));
-                      button.setPadding(18, 10, 18, 10);
-
-                      FrameLayout.LayoutParams headlineParams =
-                          new FrameLayout.LayoutParams(
-                              ViewGroup.LayoutParams.MATCH_PARENT,
-                              ViewGroup.LayoutParams.WRAP_CONTENT
-                          );
-
-                      FrameLayout.LayoutParams bodyParams =
-                          new FrameLayout.LayoutParams(
-                              ViewGroup.LayoutParams.MATCH_PARENT,
-                              ViewGroup.LayoutParams.WRAP_CONTENT
-                          );
-                      bodyParams.topMargin = 48;
-
-                      FrameLayout.LayoutParams buttonParams =
-                          new FrameLayout.LayoutParams(
-                              ViewGroup.LayoutParams.WRAP_CONTENT,
-                              ViewGroup.LayoutParams.WRAP_CONTENT
-                          );
-                      buttonParams.topMargin = 92;
-
-                      container.addView(headline, headlineParams);
-                      container.addView(body, bodyParams);
-                      container.addView(button, buttonParams);
-
-                      adView.addView(container);
-                      adView.setHeadlineView(headline);
-                      adView.setBodyView(body);
-                      adView.setCallToActionView(button);
-
-                      headline.setText(nativeAd.getHeadline());
-                      body.setText(nativeAd.getBody());
-                      button.setText(nativeAd.getCallToAction());
-
-                      adView.setNativeAd(nativeAd);
-
-                      FrameLayout.LayoutParams params =
-                          new FrameLayout.LayoutParams(
-                              ViewGroup.LayoutParams.MATCH_PARENT,
-                              ViewGroup.LayoutParams.WRAP_CONTENT,
-                              Gravity.BOTTOM
-                          );
-
-                      activity.addContentView(adView, params);
-                  });
-              }
-
-              private void loadAppOpen() {
-                  if (appOpenId.isEmpty()) return;
-
-                  AppOpenAd.load(
-                      activity,
-                      appOpenId,
-                      new AdRequest.Builder().build(),
-                      new AppOpenAdLoadCallback() {
-                          @Override
-                          public void onAdLoaded(AppOpenAd ad) {
-                              appOpenAd = ad;
-
-                              if (!appOpenShown) {
-                                  appOpenShown = true;
-                                  showAppOpenInternal();
-                              }
-                          }
-
-                          @Override
-                          public void onAdFailedToLoad(LoadAdError error) {
-                              appOpenAd = null;
-                          }
-                      }
-                  );
-              }
-
-              private void showAppOpenInternal() {
-                  if (appOpenAd == null) {
-                      loadAppOpen();
-                      return;
-                  }
-
-                  appOpenAd.setFullScreenContentCallback(
-                      new FullScreenContentCallback() {
-                          @Override
-                          public void onAdDismissedFullScreenContent() {
-                              appOpenAd = null;
-                              loadAppOpen();
-                          }
-
-                          @Override
-                          public void onAdFailedToShowFullScreenContent(
-                                  com.google.android.gms.ads.AdError error) {
-                              appOpenAd = null;
-                              loadAppOpen();
-                          }
-                      }
-                  );
-
-                  appOpenAd.show(activity);
-              }
-
-              @JavascriptInterface
-              public void showAppOpen() {
-                  activity.runOnUiThread(this::showAppOpenInternal);
-              }
-          }
-          '''
-
-          bridge_code = bridge_code.replace("PACKAGE_NAME", package_name)
-
-          bridge_file = java_dir / "AdMobBridge.java"
-          bridge_file.write_text(bridge_code, encoding="utf-8")
-
-          print("AdMob Java bridge created.")
-          print("AdMob App ID configured.")
-          print("AdMob enabled for this build.")
-          PY
-
-          # Add Google Mobile Ads SDK dependency only for enabled builds.
-          if ! grep -q "play-services-ads" myapp/app/build.gradle; then
-            cat >> myapp/app/build.gradle <<'EOF'
-
-          dependencies {
-              implementation 'com.google.android.gms:play-services-ads:23.2.0'
-          }
-          EOF
-          fi
-
-          echo "AdMob SDK and Java bridge configured."
-
-      # ============================================================
-      # Verify AdMob configuration only if AdMob is enabled.
-      # ============================================================
-      - name: Verify New AdMob Integration
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          CONFIG="myapp/app/src/main/assets/admob.config.json"
-
-          if [ ! -f "$CONFIG" ]; then
-            echo "AdMob is not configured. Skipping verification."
-            exit 0
-          fi
-
-          ENABLED=$(python3 -c "import json; print(str(json.load(open('$CONFIG')).get('enabled', False)).lower())")
-
-          if [ "$ENABLED" != "true" ]; then
-            echo "AdMob disabled. Skipping verification."
-            exit 0
-          fi
-
-          grep -q "play-services-ads" myapp/app/build.gradle
-          grep -q "AdMobBridge" myapp/app/src/main/java/*/*/*/AdMobBridge.java 2>/dev/null || \
-          find myapp/app/src/main/java -name "AdMobBridge.java" | grep -q .
-
-          grep -q "com.google.android.gms.ads.APPLICATION_ID" \
-            myapp/app/src/main/AndroidManifest.xml
-
-          echo "AdMob integration verification passed."
-
-      # ============================================================
-      # Verify launcher icons AFTER AdMob manifest modification.
-      # ============================================================
-      - name: Verify Final Android Launcher Icons
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          python3 - <<'PY'
-          import xml.etree.ElementTree as ET
-          from pathlib import Path
-
-          android_ns = "http://schemas.android.com/apk/res/android"
-          manifest_path = Path("myapp/app/src/main/AndroidManifest.xml")
-
-          if not manifest_path.is_file():
-              raise SystemExit("ERROR: AndroidManifest.xml not found.")
-
-          tree = ET.parse(manifest_path)
-          application = tree.getroot().find("application")
-
-          if application is None:
-              raise SystemExit("ERROR: Application element not found.")
-
-          icon = application.get(f"{{{android_ns}}}icon")
-          round_icon = application.get(f"{{{android_ns}}}roundIcon")
-
-          print("Manifest icon:", icon)
-          print("Manifest roundIcon:", round_icon)
-
-          if icon == "@mipmap/ic_launcher":
-              if round_icon != "@mipmap/ic_launcher":
-                  raise SystemExit("ERROR: roundIcon is not configured.")
-
-              folders = [
-                  "mipmap-mdpi",
-                  "mipmap-hdpi",
-                  "mipmap-xhdpi",
-                  "mipmap-xxhdpi",
-                  "mipmap-xxxhdpi"
-              ]
-
-              for folder in folders:
-                  icon_file = (
-                      Path("myapp/app/src/main/res")
-                      / folder
-                      / "ic_launcher.png"
-                  )
-
-                  if not icon_file.is_file():
-                      raise SystemExit(
-                          "ERROR: Missing launcher icon: " + str(icon_file)
-                      )
-
-                  if icon_file.stat().st_size == 0:
-                      raise SystemExit(
-                          "ERROR: Empty launcher icon: " + str(icon_file)
-                      )
-
-                  print("VERIFIED:", icon_file)
-
-              print("CUSTOM LAUNCHER ICON VERIFICATION PASSED.")
-
-          else:
-              print(
-                  "No custom icon configured. "
-                  "This build will use the Android default icon."
-              )
-          PY
-
-      # ============================================================
-      # AndroidX (ADDED) — Jetifier + AndroidX support
-      # ============================================================
-      - name: Enable AndroidX
-        run: |
-          cat > myapp/gradle.properties <<'EOF'
-          android.useAndroidX=true
-          android.enableJetifier=true
-          EOF
-
-      - name: Install Gradle 8.0
-        run: |
-          curl -fsSL https://services.gradle.org/distributions/gradle-8.0-bin.zip -o /tmp/gradle.zip
-          unzip -q /tmp/gradle.zip -d /tmp
-          /tmp/gradle-8.0/bin/gradle wrapper --gradle-version 8.0 --project-dir myapp
-
-      - name: Build APK
-        run: |
-          cd myapp
-          chmod +x gradlew
-          ./gradlew assembleDebug
-
-      - name: Upload APK to Public GitHub Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          BUILD_ID: ${{ github.event.client_payload.buildId }}
-        run: |
-          APK="myapp/app/build/outputs/apk/debug/app-debug.apk"
-          TAG="apk-${BUILD_ID}"
-
-          if [ ! -f "$APK" ]; then
-            echo "ERROR: APK file not found."
-            exit 1
-          fi
-
-          gh release create "$TAG" "$APK" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "APK ${BUILD_ID}" \
-            --notes "Your APK build is complete."
-
-      - name: Delete Temporary Build Branch
-        if: always()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          BUILD_REF: ${{ github.event.client_payload.ref }}
-        run: |
-          if [ -n "$BUILD_REF" ]; then
-            gh api \
-              --method DELETE \
-              "repos/${GITHUB_REPOSITORY}/git/refs/heads/${BUILD_REF}" \
-              || echo "Temporary branch was already deleted."
-          fi
-
-      # ============================================================
-      # Delete Temporary Build Branch (ADDED — fallback, github.token)
-      # Original fallback step preserved.
-      # ============================================================
-      - name: Delete Temporary Build Branch
-        env:
-          GH_TOKEN: ${{ github.token }}
-          BUILD_REF: ${{ github.event.client_payload.ref }}
-        run: |
-          if [ -n "$BUILD_REF" ]; then
-            gh api \
-              --method DELETE \
-              "repos/${GITHUB_REPOSITORY}/git/refs/heads/${BUILD_REF}" \
-              || echo "Temporary branch was already deleted."
-          fi 
+
+                bannerView = new AdView(activity);
+                bannerView.setAdUnitId(bannerId);
+                bannerView.setAdSize(AdSize.BANNER);
+
+                FrameLayout.LayoutParams params =
+                    new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        Gravity.BOTTOM
+                    );
+
+                activity.addContentView(bannerView, params);
+                bannerView.loadAd(new AdRequest.Builder().build());
+            });
+        }
+
+        @JavascriptInterface
+        public void hideBanner() {
+            activity.runOnUiThread(() -> {
+                if (bannerView != null) {
+                    bannerView.setVisibility(View.GONE);
+                }
+            });
+        }
+
+        private void loadInterstitial() {
+            if (interstitialId.isEmpty()) return;
+
+            InterstitialAd.load(
+                activity,
+                interstitialId,
+                new AdRequest.Builder().build(),
+                new InterstitialAdLoadCallback() {
+                    @Override
+                    public void onAdLoaded(InterstitialAd ad) {
+                        interstitialAd = ad;
+                    }
+
+                    @Override
+                    public void onAdFailedToLoad(LoadAdError error) {
+                        interstitialAd = null;
+                    }
+                }
+            );
+        }
+
+        @JavascriptInterface
+        public void showInterstitial() {
+            activity.runOnUiThread(() -> {
+                if (interstitialAd == null) {
+                    loadInterstitial();
+                    return;
+                }
+
+                interstitialAd.setFullScreenContentCallback(
+                    new FullScreenContentCallback() {
+                        @Override
+                        public void onAdDismissedFullScreenContent() {
+                            interstitialAd = null;
+                            loadInterstitial();
+                        }
+
+                        @Override
+                        public void onAdFailedToShowFullScreenContent(
+                                com.google.android.gms.ads.AdError error) {
+                            interstitialAd = null;
+                            loadInterstitial();
+                        }
+                    }
+                );
+
+                interstitialAd.show(activity);
+            });
+        }
+
+        private void loadRewarded() {
+            if (rewardedId.isEmpty()) return;
+
+            RewardedAd.load(
+                activity,
+                rewardedId,
+                new AdRequest.Builder().build(),
+                new RewardedAdLoadCallback() {
+                    @Override
+                    public void onAdLoaded(RewardedAd ad) {
+                        rewardedAd = ad;
+                    }
+
+                    @Override
+                    public void onAdFailedToLoad(LoadAdError error) {
+                        rewardedAd = null;
+                    }
+                }
+            );
+        }
+
+        @JavascriptInterface
+        public void showRewarded() {
+            activity.runOnUiThread(() -> {
+                if (rewardedAd == null) {
+                    loadRewarded();
+                    return;
+                }
+
+                rewardedAd.setFullScreenContentCallback(
+                    new FullScreenContentCallback() {
+                        @Override
+                        public void onAdDismissedFullScreenContent() {
+                            rewardedAd = null;
+                            loadRewarded();
+                        }
+                    }
+                );
+
+                rewardedAd.show(activity, rewardItem -> {
+                    int amount = rewardItem.getAmount();
+                    String type = rewardItem.getType();
+
+                    webView.post(() -> webView.evaluateJavascript(
+                        "if(window.onAdRewardEarned){"
+                        + "window.onAdRewardEarned("
+                        + amount + ",'"
+                        + type.replace("'", "") + "');}",
+                        null
+                    ));
+                });
+            });
+        }
+
+        private void loadNative() {
+            if (nativeId.isEmpty()) return;
+
+            AdLoader loader = new AdLoader.Builder(activity, nativeId)
+                .forNativeAd(ad -> {
+                    if (nativeAd != null) {
+                        nativeAd.destroy();
+                    }
+                    nativeAd = ad;
+                })
+                .withNativeAdOptions(new NativeAdOptions.Builder().build())
+                .withAdListener(new AdListener() {
+                    @Override
+                    public void onAdFailedToLoad(LoadAdError error) {
+                        nativeAd = null;
+                    }
+                })
+                .build();
+
+            loader.loadAd(new AdRequest.Builder().build());
+        }
+
+        @JavascriptInterface
+        public void showNative() {
+            activity.runOnUiThread(() -> {
+                if (nativeAd == null) {
+                    loadNative();
+                    return;
+                }
+
+                NativeAdView adView = new NativeAdView(activity);
+                FrameLayout container = new FrameLayout(activity);
+                container.setBackgroundColor(Color.WHITE);
+                container.setPadding(12, 8, 12, 8);
+
+                TextView headline = new TextView(activity);
+                headline.setTextColor(Color.BLACK);
+                headline.setTextSize(16);
+                headline.setMaxLines(2);
+
+                TextView body = new TextView(activity);
+                body.setTextColor(Color.DKGRAY);
+                body.setTextSize(13);
+
+                TextView button = new TextView(activity);
+                button.setTextColor(Color.WHITE);
+                button.setBackgroundColor(Color.rgb(30, 100, 210));
+                button.setPadding(18, 10, 18, 10);
+
+                FrameLayout.LayoutParams headlineParams =
+                    new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    );
+
+                FrameLayout.LayoutParams bodyParams =
+                    new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    );
+                bodyParams.topMargin = 48;
+
+                FrameLayout.LayoutParams buttonParams =
+                    new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    );
+                buttonParams.topMargin = 92;
+
+                container.addView(headline, headlineParams);
+                container.addView(body, bodyParams);
+                container.addView(button, buttonParams);
+
+                adView.addView(container);
+                adView.setHeadlineView(headline);
+                adView.setBodyView(body);
+                adView.setCallToActionView(button);
+
+                headline.setText(nativeAd.getHeadline());
+                body.setText(nativeAd.getBody());
+                button.setText(nativeAd.getCallToAction());
+
+                adView.setNativeAd(nativeAd);
+
+                FrameLayout.LayoutParams params =
+                    new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        Gravity.BOTTOM
+                    );
+
+                activity.addContentView(adView, params);
+            });
+        }
+
+        private void loadAppOpen() {
+            if (appOpenId.isEmpty()) return;
+
+            AppOpenAd.load(
+                activity,
+                appOpenId,
+                new AdRequest.Builder().build(),
+                new AppOpenAdLoadCallback() {
+                    @Override
+                    public void onAdLoaded(AppOpenAd ad) {
+                        appOpenAd = ad;
+
+                        if (!appOpenShown) {
+                            appOpenShown = true;
+                            showAppOpenInternal();
+                        }
+                    }
+
+                    @Override
+                    public void onAdFailedToLoad(LoadAdError error) {
+                        appOpenAd = null;
+                    }
+                }
+            );
+        }
+
+        private void showAppOpenInternal() {
+            if (appOpenAd == null) {
+                loadAppOpen();
+                return;
+            }
+
+            appOpenAd.setFullScreenContentCallback(
+                new FullScreenContentCallback() {
+                    @Override
+                    public void onAdDismissedFullScreenContent() {
+                        appOpenAd = null;
+                        loadAppOpen();
+                    }
+
+                    @Override
+                    public void onAdFailedToShowFullScreenContent(
+                            com.google.android.gms.ads.AdError error) {
+                        appOpenAd = null;
+                        loadAppOpen();
+                    }
+                }
+            );
+
+            appOpenAd.show(activity);
+        }
+
+        @JavascriptInterface
+        public void showAppOpen() {
+            activity.runOnUiThread(this::showAppOpenInternal);
+        }
+    }
+    '''
+
+    bridge_code = bridge_code.replace("PACKAGE_NAME", package_name)
+
+    bridge_file = java_dir / "AdMobBridge.java"
+    bridge_file.write_text(bridge_code, encoding="utf-8")
+
+    print("AdMob Java bridge created.")
+    print("AdMob App ID configured.")
+    print("AdMob enabled for this build.")
+    PY
+
+    # Add Google Mobile Ads SDK dependency only for enabled builds.
+    if ! grep -q "play-services-ads" myapp/app/build.gradle; then
+      cat >> myapp/app/build.gradle <<'EOF'
+
+    dependencies {
+        implementation 'com.google.android.gms:play-services-ads:23.2.0'
+    }
+    EOF
+    fi
+
+    echo "AdMob SDK and Java bridge configured."
+
+# ============================================================
+# Verify AdMob configuration only if AdMob is enabled.
+# ============================================================
+- name: Verify New AdMob Integration
+  shell: bash
+  run: |
+    set -euo pipefail
+
+    CONFIG="myapp/app/src/main/assets/admob.config.json"
+
+    if [ ! -f "$CONFIG" ]; then
+      echo "AdMob is not configured. Skipping verification."
+      exit 0
+    fi
+
+    ENABLED=$(python3 -c "import json; print(str(json.load(open('$CONFIG')).get('enabled', False)).lower())")
+
+    if [ "$ENABLED" != "true" ]; then
+      echo "AdMob disabled. Skipping verification."
+      exit 0
+    fi
+
+    grep -q "play-services-ads" myapp/app/build.gradle
+    grep -q "AdMobBridge" myapp/app/src/main/java/*/*/*/AdMobBridge.java 2>/dev/null || \
+    find myapp/app/src/main/java -name "AdMobBridge.java" | grep -q .
+
+    grep -q "com.google.android.gms.ads.APPLICATION_ID" \
+      myapp/app/src/main/AndroidManifest.xml
+
+    echo "AdMob integration verification passed."
+
+# ============================================================
+# Verify launcher icons AFTER AdMob manifest modification.
+# ============================================================
+- name: Verify Final Android Launcher Icons
+  shell: bash
+  run: |
+    set -euo pipefail
+
+    python3 - <<'PY'
+    import xml.etree.ElementTree as ET
+    from pathlib import Path
+
+    android_ns = "http://schemas.android.com/apk/res/android"
+    manifest_path = Path("myapp/app/src/main/AndroidManifest.xml")
+
+    if not manifest_path.is_file():
+        raise SystemExit("ERROR: AndroidManifest.xml not found.")
+
+    tree = ET.parse(manifest_path)
+    application = tree.getroot().find("application")
+
+    if application is None:
+        raise SystemExit("ERROR: Application element not found.")
+
+    icon = application.get(f"{{{android_ns}}}icon")
+    round_icon = application.get(f"{{{android_ns}}}roundIcon")
+
+    print("Manifest icon:", icon)
+    print("Manifest roundIcon:", round_icon)
+
+    if icon == "@mipmap/ic_launcher":
+        if round_icon != "@mipmap/ic_launcher":
+            raise SystemExit("ERROR: roundIcon is not configured.")
+
+        folders = [
+            "mipmap-mdpi",
+            "mipmap-hdpi",
+            "mipmap-xhdpi",
+            "mipmap-xxhdpi",
+            "mipmap-xxxhdpi"
+        ]
+
+        for folder in folders:
+            icon_file = (
+                Path("myapp/app/src/main/res")
+                / folder
+                / "ic_launcher.png"
+            )
+
+            if not icon_file.is_file():
+                raise SystemExit(
+                    "ERROR: Missing launcher icon: " + str(icon_file)
+                )
+
+            if icon_file.stat().st_size == 0:
+                raise SystemExit(
+                    "ERROR: Empty launcher icon: " + str(icon_file)
+                )
+
+            print("VERIFIED:", icon_file)
+
+        print("CUSTOM LAUNCHER ICON VERIFICATION PASSED.")
+
+    else:
+        print(
+            "No custom icon configured. "
+            "This build will use the Android default icon."
+        )
+    PY
+# ============================================================
+# AndroidX (ADDED) — Jetifier + AndroidX support
+# ============================================================
+- name: Enable AndroidX
+  run: |
+    cat > myapp/gradle.properties <<'EOF'
+    android.useAndroidX=true
+    android.enableJetifier=true
+    EOF
+
+- name: Install Gradle 8.0
+  run: |
+    curl -fsSL https://services.gradle.org/distributions/gradle-8.0-bin.zip -o /tmp/gradle.zip
+    unzip -q /tmp/gradle.zip -d /tmp
+    /tmp/gradle-8.0/bin/gradle wrapper --gradle-version 8.0 --project-dir myapp
+
+- name: Build APK
+  run: |
+    cd myapp
+    chmod +x gradlew
+    ./gradlew assembleDebug
+
+- name: Upload APK to Public GitHub Release
+  env:
+    GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    BUILD_ID: ${{ github.event.client_payload.buildId }}
+  run: |
+    APK="myapp/app/build/outputs/apk/debug/app-debug.apk"
+    TAG="apk-${BUILD_ID}"
+
+    if [ ! -f "$APK" ]; then
+      echo "ERROR: APK file not found."
+      exit 1
+    fi
+
+    gh release create "$TAG" "$APK" \
+      --repo "$GITHUB_REPOSITORY" \
+      --title "APK ${BUILD_ID}" \
+      --notes "Your APK build is complete."
+
+- name: Delete Temporary Build Branch
+  if: always()
+  env:
+    GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    BUILD_REF: ${{ github.event.client_payload.ref }}
+  run: |
+    if [ -n "$BUILD_REF" ]; then
+      gh api \
+        --method DELETE \
+        "repos/${GITHUB_REPOSITORY}/git/refs/heads/${BUILD_REF}" \
+        || echo "Temporary branch was already deleted."
+    fi
+
+# ============================================================
+# Delete Temporary Build Branch (ADDED — fallback, github.token)
+# Original fallback step preserved.
+# ============================================================
+- name: Delete Temporary Build Branch
+  env:
+    GH_TOKEN: ${{ github.token }}
+    BUILD_REF: ${{ github.event.client_payload.ref }}
+  run: |
+    if [ -n "$BUILD_REF" ]; then
+      gh api \
+        --method DELETE \
+        "repos/${GITHUB_REPOSITORY}/git/refs/heads/${BUILD_REF}" \
+        || echo "Temporary branch was already deleted."
+    fi
