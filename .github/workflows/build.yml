@@ -859,7 +859,7 @@ jobs:
 
           def fetch_and_store(url, referer_file, base_url_for_join):
               """Download URL, save to vendor dir, return local filename."""
-              nonlocal total_downloaded_bytes
+              global total_downloaded_bytes
               if len(downloaded) >= MAX_RESOURCES:
                   return None
               data, extra = download_resource(url, referer=referer_file)
