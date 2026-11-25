@@ -758,17 +758,38 @@ jobs:
               html = new_html
               print(f"SUCCESS: Replaced {count} Tailwind CDN script tag(s).")
           elif local_link.search(html):
-              # Safe rerun: an earlier workflow step/run already replaced it.
-              print("INFO: Tailwind CDN was already replaced; local CSS link exists.")
+              # Safe rerun: an earlier workflow step/run already added the link.
+              print("INFO: Local Tailwind CSS link already exists.")
           else:
-              raise SystemExit(
-                  "ERROR: No Tailwind CDN script or local Tailwind CSS link found. "
-                  "Check the exact project ZIP uploaded for this APK build."
-              )
+              # The source HTML may already have had the CDN script removed
+              # by another preparation step. Add the local stylesheet link
+              # without requiring any manual edit to the user's index.html.
+              link_tag = '<link rel="stylesheet" href="_generated/tailwind.css">'
+              if re.search(r'</head\s*>', html, re.IGNORECASE):
+                  html = re.sub(
+                      r'</head\s*>',
+                      link_tag + '\\n</head>',
+                      html,
+                      count=1,
+                      flags=re.IGNORECASE,
+                  )
+              elif re.search(r'<body\b', html, re.IGNORECASE):
+                  html = re.sub(
+                      r'<body\b',
+                      link_tag + '\\n<body',
+                      html,
+                      count=1,
+                      flags=re.IGNORECASE,
+                  )
+              else:
+                  html = link_tag + '\\n' + html
+
+              p.write_text(html, encoding="utf-8")
+              print("INFO: CDN script was absent; inserted local Tailwind CSS link.")
 
           if not local_link.search(html):
               raise SystemExit(
-                  "ERROR: Local _generated/tailwind.css link is missing after injection."
+                  "ERROR: Could not add local _generated/tailwind.css link to APK index.html."
               )
 
           if pattern.search(html):
