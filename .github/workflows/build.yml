@@ -527,6 +527,10 @@ jobs:
               print("LAUNCHER ICON VERIFICATION PASSED.")
 
           # Create MainActivity with Android WebView file picker support.
+          # FIX 1: WebViewAssetLoader is used so woff2 fonts load correctly
+          # and Font Awesome icons render properly. file:// URLs block
+          # cross-origin font loading on Android 7+ which causes invisible
+          # but clickable icons.
           java_code = f'''package {package_name};
 
           import android.app.Activity;
@@ -538,7 +542,11 @@ jobs:
           import android.webkit.WebChromeClient;
           import android.webkit.WebSettings;
           import android.webkit.ValueCallback;
+          import android.webkit.WebResourceRequest;
+          import android.webkit.WebResourceResponse;
           import android.content.ActivityNotFoundException;
+
+          import androidx.webkit.WebViewAssetLoader;
 
           public class MainActivity extends Activity {{
               private WebView webView;
@@ -557,7 +565,17 @@ jobs:
                   settings.setAllowFileAccess(true);
                   settings.setAllowContentAccess(true);
 
-                  webView.setWebViewClient(new WebViewClient());
+                  final WebViewAssetLoader assetLoader = new WebViewAssetLoader.Builder()
+                      .addPathHandler("/assets/", new WebViewAssetLoader.AssetsPathHandler(this))
+                      .build();
+
+                  webView.setWebViewClient(new WebViewClient() {{
+                      @Override
+                      public WebResourceResponse shouldInterceptRequest(
+                              WebView view, WebResourceRequest request) {{
+                          return assetLoader.shouldInterceptRequest(request.getUrl());
+                      }}
+                  }});
 
                   webView.setWebChromeClient(new WebChromeClient() {{
                       @Override
@@ -587,7 +605,7 @@ jobs:
                       }}
                   }});
 
-                  webView.loadUrl("file:///android_asset/index.html");
+                  webView.loadUrl("https://appassets.androidplatform.net/assets/index.html");
                   setContentView(webView);
               }}
 
@@ -640,15 +658,6 @@ jobs:
           PY
 
       # ============================================================
-      # OFFLINE DEPENDENCY BUNDLING SYSTEM (ADDED)
-      # Downloads external CSS / JS / fonts / icons / images
-      # referenced by HTML and CSS files, saves them locally in
-      # the APK assets, rewrites URLs to local relative paths, and
-      # writes offline-bundling-report.json.
-      # This step never fails the build on download errors — it
-      # only reports them.
-      # ============================================================
-      # ============================================================
       # COMPILE TAILWIND LOCALLY
       # The Tailwind Play CDN is a browser-side runtime compiler.
       # Compile utility classes during the GitHub build instead, so
@@ -699,6 +708,91 @@ jobs:
           echo "Tailwind CSS compiled and saved inside APK assets."
           echo "==============================================="
 
+      # ============================================================
+      # FIX 2 (NEW STEP): Inject local Tailwind CSS link into APK
+      # index.html so the APK does not depend on the Tailwind Play CDN
+      # at runtime. This replaces the CDN <script> tag with a local
+      # <link> tag pointing at _generated/tailwind.css.
+      #
+      # IMPORTANT: This step ONLY modifies the APK copy of index.html
+      # (myapp/app/src/main/assets/index.html). The original index.html
+      # on Vercel / GitHub is NOT touched, so the online version keeps
+      # its original working design.
+      # ============================================================
+      - name: Inject Tailwind CSS link into APK index.html
+        run: |
+          set -euo pipefail
+          ASSETS="myapp/app/src/main/assets"
+          INDEX="$ASSETS/index.html"
+          if [ ! -f "$INDEX" ]; then
+            echo "ERROR: index.html missing before Tailwind injection."
+            exit 1
+          fi
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("myapp/app/src/main/assets/index.html")
+          html = p.read_text(encoding="utf-8")
+          orig = html
+
+          # Replace the Tailwind Play CDN <script> tag with a local <link>.
+          # Handles both single and double quotes, and optional self-closing.
+          replacements = [
+              ('<script src="https://cdn.tailwindcss.com"></script>',
+               '<link rel="stylesheet" href="_generated/tailwind.css">'),
+              ("<script src='https://cdn.tailwindcss.com'></script>",
+               '<link rel="stylesheet" href="_generated/tailwind.css">'),
+          ]
+
+          applied = False
+          for old, new in replacements:
+              if old in html:
+                  html = html.replace(old, new)
+                  applied = True
+                  break
+
+          if not applied:
+              # Fallback: regex replacement tolerant of attributes/whitespace.
+              import re
+              pattern = re.compile(
+                  r'<script[^>]*\bsrc\s*=\s*["\']https://cdn\.tailwindcss\.com["\'][^>]*>\s*</script>',
+                  re.IGNORECASE,
+              )
+              new_html, n = pattern.subn(
+                  '<link rel="stylesheet" href="_generated/tailwind.css">',
+                  html,
+              )
+              if n > 0:
+                  html = new_html
+                  applied = True
+
+          if not applied:
+              raise SystemExit(
+                  "ERROR: Tailwind <script src=\"https://cdn.tailwindcss.com\"> "
+                  "tag not found in APK index.html. Cannot inject local CSS."
+              )
+
+          p.write_text(html, encoding="utf-8")
+          print("Tailwind CDN script replaced with local _generated/tailwind.css")
+          print("APK index.html now uses local Tailwind CSS. Offline design will work.")
+          PY
+
+          # Verify the replacement actually happened.
+          if grep -q "cdn.tailwindcss.com" "$ASSETS/index.html"; then
+            echo "ERROR: Tailwind CDN still present in APK index.html after injection."
+            exit 1
+          fi
+          echo "Verified: Tailwind CDN removed from APK index.html."
+
+      # ============================================================
+      # OFFLINE DEPENDENCY BUNDLING SYSTEM (ADDED)
+      # Downloads external CSS / JS / fonts / icons / images
+      # referenced by HTML and CSS files, saves them locally in
+      # the APK assets, rewrites URLs to local relative paths, and
+      # writes offline-bundling-report.json.
+      # This step never fails the build on download errors — it
+      # only reports them.
+      # ============================================================
       - name: Offline Dependency Bundling
         env:
           PYTHONUNBUFFERED: "1"
@@ -1246,18 +1340,30 @@ jobs:
                       process_css_file(child, visited)
 
           # ============================================================
-          # Walk all HTML and CSS files under assets (excluding vendor
-          # dir the first pass; vendor CSS is handled by recursion).
+          # Walk all HTML and CSS files under assets.
+          #
+          # FIX 4 (integrated): Skip _offline_vendor/, _bundled/,
+          # and _generated/ on the primary scan so the client-side
+          # bundler output and local Tailwind CSS are not re-processed.
+          # _bundled/ is still handled by recursive CSS processing
+          # below so its url() refs to fonts still resolve.
           # ============================================================
           html_files = sorted(ASSETS.rglob("*.html"))
           css_files = sorted(ASSETS.rglob("*.css"))
+
+          # Rewrite any client-side bundler output references so the
+          # server-side bundler does not duplicate what the client
+          # already downloaded.
+          CLIENT_BUNDLED = ASSETS / "_bundled"
 
           for html_file in html_files:
               try:
                   rel = html_file.relative_to(ASSETS)
               except ValueError:
                   continue
-              if rel.parts and rel.parts[0] == "_offline_vendor":
+              if rel.parts and rel.parts[0] in (
+                  "_offline_vendor", "_bundled", "_generated"
+              ):
                   continue
               try:
                   process_html_file(html_file)
@@ -1274,7 +1380,9 @@ jobs:
                   rel = css_file.relative_to(ASSETS)
               except ValueError:
                   continue
-              if rel.parts and rel.parts[0] == "_offline_vendor":
+              if rel.parts and rel.parts[0] in (
+                  "_offline_vendor", "_generated"
+              ):
                   continue
               try:
                   process_css_file(css_file, visited_css)
@@ -1284,6 +1392,21 @@ jobs:
                       "reason": "css processing error: " + str(e),
                       "referer": "",
                   })
+
+          # Process any client-bundled CSS files from the browser-side
+          # bundler so their url() references (fonts) get downloaded
+          # too. This prevents "invisible icons" caused by missing
+          # .woff2 files when the client bundler succeeds but the
+          # server bundler previously ignored _bundled/.
+          if CLIENT_BUNDLED.is_dir():
+              print("Client-side bundler output detected at _bundled/ "
+                    "— including in scan.")
+              for bundled_css in CLIENT_BUNDLED.glob("*.css"):
+                  try:
+                      process_css_file(bundled_css, visited_css)
+                  except Exception as e:
+                      print("WARNING: could not process bundled CSS",
+                            bundled_css, e)
 
           # Recursive pass on newly downloaded CSS files that weren't
           # yet processed.
@@ -1339,6 +1462,57 @@ jobs:
               print("UNSUPPORTED:", u["file"], "-", u["reason"])
           print("========== OFFLINE BUNDLING END ==========")
           PY
+
+      # ============================================================
+      # FIX 3 (NEW STEP): Verify all critical offline assets made it
+      # into the APK. If Tailwind CSS is missing, if the CDN script
+      # is still in index.html, or if there are zero font files, the
+      # build fails HERE instead of shipping a broken APK to the user.
+      # ============================================================
+      - name: Verify Critical Offline Assets
+        run: |
+          set -euo pipefail
+          ASSETS="myapp/app/src/main/assets"
+
+          echo "=== Tailwind CSS ==="
+          if [ ! -s "$ASSETS/_generated/tailwind.css" ]; then
+            echo "ERROR: _generated/tailwind.css is missing or empty."
+            echo "Offline design will be broken. Aborting build."
+            exit 1
+          fi
+          wc -c "$ASSETS/_generated/tailwind.css"
+
+          echo "=== Tailwind CDN removed from APK index.html ==="
+          if grep -q "cdn.tailwindcss.com" "$ASSETS/index.html"; then
+            echo "ERROR: Tailwind CDN still present in APK index.html."
+            echo "Offline build will be broken. Aborting build."
+            exit 1
+          fi
+          echo "Tailwind CDN removed: OK"
+
+          echo "=== Font files (.woff2 / .woff / .ttf) ==="
+          WOFF_COUNT=$(find "$ASSETS" \( -name "*.woff2" -o -name "*.woff" -o -name "*.ttf" \) 2>/dev/null | wc -l)
+          echo "Font files found: $WOFF_COUNT"
+          if [ "$WOFF_COUNT" -lt 1 ]; then
+            echo "ERROR: No font files in APK assets — icons will be invisible."
+            echo "Check that _bundled/ or _offline_vendor/ contains font files."
+            echo "Aborting build."
+            exit 1
+          fi
+
+          echo "=== Font Awesome CSS sanity check ==="
+          FA_CSS=$(find "$ASSETS" -name "*.css" 2>/dev/null | xargs grep -l "font-family.*Font Awesome" 2>/dev/null | head -1 || true)
+          if [ -z "$FA_CSS" ]; then
+            echo "WARNING: No Font Awesome CSS detected in APK assets."
+            echo "Icons may still be visible if CSS is inlined, but check the report."
+          else
+            echo "Font Awesome CSS: $FA_CSS"
+          fi
+
+          echo "=== All local asset references in index.html ==="
+          grep -oE '(src|href)="[^"]*"' "$ASSETS/index.html" | grep -vE '^(src|href)="https?://' | head -20 || true
+
+          echo "ALL CRITICAL OFFLINE ASSETS VERIFIED."
 
       - name: Create Gradle Project
         run: |
@@ -1412,6 +1586,34 @@ jobs:
           PY
         env:
           BUILD_ID: ${{ github.event.client_payload.buildId }}
+
+      # ============================================================
+      # FIX 4 (NEW STEP): Always add androidx.webkit dependency
+      # so WebViewAssetLoader can be used in MainActivity.java.
+      # This runs whether AdMob is enabled or not. If AdMob is
+      # enabled, the AdMob step later adds its own dependencies
+      # block — both are present, no conflict.
+      # ============================================================
+      - name: Add androidx.webkit dependency for WebViewAssetLoader
+        run: |
+          set -euo pipefail
+          BUILD_GRADLE="myapp/app/build.gradle"
+
+          if grep -q "androidx.webkit:webkit" "$BUILD_GRADLE"; then
+            echo "androidx.webkit already present — skipping."
+            exit 0
+          fi
+
+          cat >> "$BUILD_GRADLE" <<'EOF'
+
+          dependencies {
+              implementation 'androidx.webkit:webkit:1.8.0'
+          }
+          EOF
+
+          echo "androidx.webkit:webkit:1.8.0 added to app/build.gradle."
+          echo "--- Current dependencies in build.gradle ---"
+          grep -A20 "^dependencies" "$BUILD_GRADLE" || true
 
       # ============================================================
       # Google AdMob (Google Mobile Ads SDK) — OLD DISABLED STEPS
@@ -1589,11 +1791,24 @@ jobs:
           )
 
           if "new AdMobBridge(this, webView)" not in source:
-              source = source.replace(
-                  'webView.loadUrl("file:///android_asset/index.html");',
-                  bridge_line + '\n                  '
-                  'webView.loadUrl("file:///android_asset/index.html");'
-              )
+              anchor_new = 'webView.loadUrl("https://appassets.androidplatform.net/assets/index.html");'
+              anchor_old = 'webView.loadUrl("file:///android_asset/index.html");'
+
+              if anchor_new in source:
+                  source = source.replace(
+                      anchor_new,
+                      bridge_line + '\n                  ' + anchor_new
+                  )
+              elif anchor_old in source:
+                  source = source.replace(
+                      anchor_old,
+                      bridge_line + '\n                  ' + anchor_old
+                  )
+              else:
+                  raise SystemExit(
+                      "ERROR: Could not find webView.loadUrl call to "
+                      "inject AdMobBridge."
+                  )
 
           main_activity.write_text(source, encoding="utf-8")
 
@@ -2178,4 +2393,4 @@ jobs:
               --method DELETE \
               "repos/${GITHUB_REPOSITORY}/git/refs/heads/${BUILD_REF}" \
               || echo "Temporary branch was already deleted."
-          fi 
+          fi
