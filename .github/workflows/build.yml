@@ -680,10 +680,27 @@ jobs:
           CSS
 
           cat > /tmp/tailwind.config.cjs <<'JS'
+          const path = require("path");
+
+          // Use absolute paths because this config file is stored in /tmp.
+          // Relative content globs would incorrectly scan /tmp/myapp/...,
+          // instead of the actual project assets directory.
+          const assetsDir = path.join(
+            process.cwd(),
+            "myapp",
+            "app",
+            "src",
+            "main",
+            "assets"
+          );
+
           module.exports = {
             content: [
-              "./myapp/app/src/main/assets/**/*.html",
-              "./myapp/app/src/main/assets/**/*.js"
+              path.join(assetsDir, "**/*.html"),
+              path.join(assetsDir, "**/*.js"),
+              path.join(assetsDir, "**/*.jsx"),
+              path.join(assetsDir, "**/*.ts"),
+              path.join(assetsDir, "**/*.tsx")
             ],
             theme: { extend: {} },
             plugins: []
@@ -702,8 +719,13 @@ jobs:
           fi
 
           echo "========== TAILWIND CSS VERIFICATION =========="
-          wc -c "$ASSETS/_generated/tailwind.css"
-          head -c 180 "$ASSETS/_generated/tailwind.css"
+          CSS_BYTES=$(wc -c < "$ASSETS/_generated/tailwind.css")
+          echo "Generated Tailwind CSS bytes: $CSS_BYTES"
+          if [ "$CSS_BYTES" -lt 10000 ]; then
+            echo "WARNING: Generated CSS is unusually small."
+            echo "Check whether Tailwind detected the utility classes in the HTML/JS files."
+          fi
+          head -c 300 "$ASSETS/_generated/tailwind.css"
           echo
           echo "Tailwind CSS compiled and saved inside APK assets."
           echo "==============================================="
