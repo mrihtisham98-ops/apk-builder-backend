@@ -735,11 +735,16 @@ jobs:
           p = Path("myapp/app/src/main/assets/index.html")
           html = p.read_text(encoding="utf-8")
 
-          # Replace EVERY Tailwind Play CDN script tag, not just the first.
-          # Supports single/double quotes, extra attributes, whitespace,
-          # optional CDN path/query, and case variations.
+          # Match the real HTML script element, including an optional
+          # non-empty body. Do not match escaped script markup inside JS
+          # template strings (for example: <\/script>).
           pattern = re.compile(
-              r'<script\b(?=[^>]*\bsrc\s*=\s*["\']https://cdn\.tailwindcss\.com(?:/[^"\']*)?(?:\?[^"\']*)?["\'])[^>]*>\s*</script\s*>',
+              r'<script\b(?=[^>]*\bsrc\s*=\s*["\']https://cdn\.tailwindcss\.com(?:/[^"\']*)?(?:\?[^"\']*)?["\'])[^>]*>.*?</script\s*>',
+              re.IGNORECASE | re.DOTALL,
+          )
+
+          local_link = re.compile(
+              r'<link\b(?=[^>]*\bhref\s*=\s*["\']_generated/tailwind\.css["\'])[^>]*>',
               re.IGNORECASE,
           )
 
@@ -748,22 +753,29 @@ jobs:
               html,
           )
 
-          if count == 0:
+          if count > 0:
+              p.write_text(new_html, encoding="utf-8")
+              html = new_html
+              print(f"SUCCESS: Replaced {count} Tailwind CDN script tag(s).")
+          elif local_link.search(html):
+              # Safe rerun: an earlier workflow step/run already replaced it.
+              print("INFO: Tailwind CDN was already replaced; local CSS link exists.")
+          else:
               raise SystemExit(
-                  "ERROR: No Tailwind CDN script tag found in APK index.html. "
-                  "Cannot inject local CSS."
+                  "ERROR: No Tailwind CDN script or local Tailwind CSS link found. "
+                  "Check the exact project ZIP uploaded for this APK build."
               )
 
-          p.write_text(new_html, encoding="utf-8")
-
-          # Verify no executable Tailwind CDN script remains.
-          remaining = pattern.findall(new_html)
-          if remaining:
+          if not local_link.search(html):
               raise SystemExit(
-                  "ERROR: Tailwind CDN script still exists after replacement."
+                  "ERROR: Local _generated/tailwind.css link is missing after injection."
               )
 
-          print(f"SUCCESS: Replaced {count} Tailwind CDN script tag(s).")
+          if pattern.search(html):
+              raise SystemExit(
+                  "ERROR: Executable Tailwind CDN script remains after injection."
+              )
+
           print("Verified: APK index.html links to local _generated/tailwind.css.")
           PY
 
@@ -774,8 +786,8 @@ jobs:
 
           html = Path("myapp/app/src/main/assets/index.html").read_text(encoding="utf-8")
           pattern = re.compile(
-              r'<script\b(?=[^>]*\bsrc\s*=\s*["\']https://cdn\.tailwindcss\.com(?:/[^"\']*)?(?:\?[^"\']*)?["\'])[^>]*>',
-              re.IGNORECASE,
+              r'<script\b(?=[^>]*\bsrc\s*=\s*["\']https://cdn\.tailwindcss\.com(?:/[^"\']*)?(?:\?[^"\']*)?["\'])[^>]*>.*?</script\s*>',
+              re.IGNORECASE | re.DOTALL,
           )
           if pattern.search(html):
               raise SystemExit("ERROR: Tailwind CDN script still exists after injection.")
@@ -1487,8 +1499,8 @@ jobs:
 
           html = Path("myapp/app/src/main/assets/index.html").read_text(encoding="utf-8")
           pattern = re.compile(
-              r'<script\b(?=[^>]*\bsrc\s*=\s*["\']https://cdn\.tailwindcss\.com(?:/[^"\']*)?(?:\?[^"\']*)?["\'])[^>]*>',
-              re.IGNORECASE,
+              r'<script\b(?=[^>]*\bsrc\s*=\s*["\']https://cdn\.tailwindcss\.com(?:/[^"\']*)?(?:\?[^"\']*)?["\'])[^>]*>.*?</script\s*>',
+              re.IGNORECASE | re.DOTALL,
           )
           if pattern.search(html):
               raise SystemExit(
