@@ -1730,6 +1730,64 @@ jobs:
 
           echo "ALL CRITICAL OFFLINE ASSETS VERIFIED."
 
+      # ============================================================
+      # INLINE TAILWIND CSS INTO THE APK HTML
+      # This avoids WebView local stylesheet URL/loading problems.
+      # Only the APK copy under myapp/assets is changed; source HTML
+      # in the uploaded project / online site remains untouched.
+      # ============================================================
+      - name: Inline Tailwind CSS for Android WebView
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import re
+
+          assets = Path("myapp/app/src/main/assets")
+          index = assets / "index.html"
+          css_file = assets / "_generated/tailwind.css"
+
+          if not index.is_file():
+              raise SystemExit("ERROR: APK index.html is missing before CSS inlining.")
+          if not css_file.is_file() or css_file.stat().st_size < 10000:
+              raise SystemExit("ERROR: Generated Tailwind CSS is missing or unexpectedly small.")
+
+          html = index.read_text(encoding="utf-8")
+          css = css_file.read_text(encoding="utf-8")
+
+          # Ensure the generated stylesheet contains common utility rules.
+          required = [".flex", ".h-screen", ".items-center"]
+          missing = [selector for selector in required if selector not in css]
+          if missing:
+              raise SystemExit("ERROR: Tailwind utility selectors missing: " + ", ".join(missing))
+
+          # Remove the external/local Tailwind stylesheet references from
+          # the APK copy. The complete CSS is embedded directly below.
+          html = re.sub(
+              r'<link\b(?=[^>]*\bhref\s*=\s*["\'](?:_generated/)?tailwind\.css["\'])[^>]*>',
+              '', html, flags=re.IGNORECASE
+          )
+
+          style_tag = '<style id="webappstudio-tailwind-offline">\n' + css + '\n</style>'
+          if 'id="webappstudio-tailwind-offline"' in html:
+              html = re.sub(
+                  r'<style\b[^>]*id=["\']webappstudio-tailwind-offline["\'][^>]*>.*?</style\s*>',
+                  lambda _m: style_tag,
+                  html,
+                  count=1,
+                  flags=re.IGNORECASE | re.DOTALL
+              )
+          elif re.search(r'</head\s*>', html, re.IGNORECASE):
+              html = re.sub(r'</head\s*>', lambda _m: style_tag + '\n</head>', html, count=1, flags=re.IGNORECASE)
+          else:
+              raise SystemExit("ERROR: </head> not found; cannot inline Tailwind CSS safely.")
+
+          index.write_text(html, encoding="utf-8")
+          print("SUCCESS: Tailwind CSS inlined into APK index.html.")
+          print("Inline CSS bytes:", len(css.encode("utf-8")))
+          print("Verified selectors:", ", ".join(required))
+          PYCODE
+
       - name: Create Gradle Project
         run: |
           mkdir -p myapp/app
