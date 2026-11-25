@@ -730,59 +730,57 @@ jobs:
           fi
           python3 - <<'PY'
           from pathlib import Path
+          import re
 
           p = Path("myapp/app/src/main/assets/index.html")
           html = p.read_text(encoding="utf-8")
-          orig = html
 
-          # Replace the Tailwind Play CDN <script> tag with a local <link>.
-          # Handles both single and double quotes, and optional self-closing.
-          replacements = [
-              ('<script src="https://cdn.tailwindcss.com"></script>',
-               '<link rel="stylesheet" href="_generated/tailwind.css">'),
-              ("<script src='https://cdn.tailwindcss.com'></script>",
-               '<link rel="stylesheet" href="_generated/tailwind.css">'),
-          ]
+          # Replace EVERY Tailwind Play CDN script tag, not just the first.
+          # Supports single/double quotes, extra attributes, whitespace,
+          # optional CDN path/query, and case variations.
+          pattern = re.compile(
+              r'<script\b(?=[^>]*\bsrc\s*=\s*["\']https://cdn\.tailwindcss\.com(?:/[^"\']*)?(?:\?[^"\']*)?["\'])[^>]*>\s*</script\s*>',
+              re.IGNORECASE,
+          )
 
-          applied = False
-          for old, new in replacements:
-              if old in html:
-                  html = html.replace(old, new)
-                  applied = True
-                  break
+          new_html, count = pattern.subn(
+              '<link rel="stylesheet" href="_generated/tailwind.css">',
+              html,
+          )
 
-          if not applied:
-              # Fallback: regex replacement tolerant of attributes/whitespace.
-              import re
-              pattern = re.compile(
-                  r'<script[^>]*\bsrc\s*=\s*["\']https://cdn\.tailwindcss\.com["\'][^>]*>\s*</script>',
-                  re.IGNORECASE,
-              )
-              new_html, n = pattern.subn(
-                  '<link rel="stylesheet" href="_generated/tailwind.css">',
-                  html,
-              )
-              if n > 0:
-                  html = new_html
-                  applied = True
-
-          if not applied:
+          if count == 0:
               raise SystemExit(
-                  "ERROR: Tailwind <script src=\"https://cdn.tailwindcss.com\"> "
-                  "tag not found in APK index.html. Cannot inject local CSS."
+                  "ERROR: No Tailwind CDN script tag found in APK index.html. "
+                  "Cannot inject local CSS."
               )
 
-          p.write_text(html, encoding="utf-8")
-          print("Tailwind CDN script replaced with local _generated/tailwind.css")
-          print("APK index.html now uses local Tailwind CSS. Offline design will work.")
+          p.write_text(new_html, encoding="utf-8")
+
+          # Verify no executable Tailwind CDN script remains.
+          remaining = pattern.findall(new_html)
+          if remaining:
+              raise SystemExit(
+                  "ERROR: Tailwind CDN script still exists after replacement."
+              )
+
+          print(f"SUCCESS: Replaced {count} Tailwind CDN script tag(s).")
+          print("Verified: APK index.html links to local _generated/tailwind.css.")
           PY
 
-          # Verify the replacement actually happened.
-          if grep -q "cdn.tailwindcss.com" "$ASSETS/index.html"; then
-            echo "ERROR: Tailwind CDN still present in APK index.html after injection."
-            exit 1
-          fi
-          echo "Verified: Tailwind CDN removed from APK index.html."
+          # Verify no executable Tailwind CDN script remains.
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          html = Path("myapp/app/src/main/assets/index.html").read_text(encoding="utf-8")
+          pattern = re.compile(
+              r'<script\b(?=[^>]*\bsrc\s*=\s*["\']https://cdn\.tailwindcss\.com(?:/[^"\']*)?(?:\?[^"\']*)?["\'])[^>]*>',
+              re.IGNORECASE,
+          )
+          if pattern.search(html):
+              raise SystemExit("ERROR: Tailwind CDN script still exists after injection.")
+          print("Verified: No Tailwind CDN script remains in APK index.html.")
+          PY
 
       # ============================================================
       # OFFLINE DEPENDENCY BUNDLING SYSTEM (ADDED)
@@ -1483,12 +1481,22 @@ jobs:
           wc -c "$ASSETS/_generated/tailwind.css"
 
           echo "=== Tailwind CDN removed from APK index.html ==="
-          if grep -q "cdn.tailwindcss.com" "$ASSETS/index.html"; then
-            echo "ERROR: Tailwind CDN still present in APK index.html."
-            echo "Offline build will be broken. Aborting build."
-            exit 1
-          fi
-          echo "Tailwind CDN removed: OK"
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          html = Path("myapp/app/src/main/assets/index.html").read_text(encoding="utf-8")
+          pattern = re.compile(
+              r'<script\b(?=[^>]*\bsrc\s*=\s*["\']https://cdn\.tailwindcss\.com(?:/[^"\']*)?(?:\?[^"\']*)?["\'])[^>]*>',
+              re.IGNORECASE,
+          )
+          if pattern.search(html):
+              raise SystemExit(
+                  "ERROR: Tailwind CDN script still present in APK index.html. "
+                  "Offline build will be broken."
+              )
+          print("Tailwind CDN script removed: OK")
+          PY
 
           echo "=== Font files (.woff2 / .woff / .ttf) ==="
           WOFF_COUNT=$(find "$ASSETS" \( -name "*.woff2" -o -name "*.woff" -o -name "*.ttf" \) 2>/dev/null | wc -l)
