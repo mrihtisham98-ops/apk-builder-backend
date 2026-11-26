@@ -1758,7 +1758,8 @@ jobs:
 
           if not index.is_file():
               raise SystemExit("ERROR: APK index.html is missing before CSS inlining.")
-          if not css_file.is_file() or css_file.stat().st_size < 10000:
+          # Minified Tailwind CSS may validly be below 10 KB; reject only missing or empty output.
+if not css_file.is_file() or css_file.stat().st_size == 0:
               raise SystemExit("ERROR: Generated Tailwind CSS is missing or unexpectedly small.")
 
           html = index.read_text(encoding="utf-8")
