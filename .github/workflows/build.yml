@@ -1765,11 +1765,12 @@ jobs:
           html = index.read_text(encoding="utf-8")
           css = css_file.read_text(encoding="utf-8")
 
-          # Ensure the generated stylesheet contains common utility rules.
-          required = [".flex", ".h-screen", ".items-center"]
-          missing = [selector for selector in required if selector not in css]
-          if missing:
-              raise SystemExit("ERROR: Tailwind utility selectors missing: " + ", ".join(missing))
+          # Do not require fixed utility selectors: a valid project may not use
+          # every example class (for example, h-screen or items-center).
+          # Tailwind's content scanner generates only utilities actually found
+          # in the project's HTML/JS source.
+          if not css.strip():
+              raise SystemExit("ERROR: Tailwind generated an empty stylesheet.")
 
           # Remove the external/local Tailwind stylesheet references from
           # the APK copy. The complete CSS is embedded directly below.
@@ -1795,7 +1796,7 @@ jobs:
           index.write_text(html, encoding="utf-8")
           print("SUCCESS: Tailwind CSS inlined into APK index.html.")
           print("Inline CSS bytes:", len(css.encode("utf-8")))
-          print("Verified selectors:", ", ".join(required))
+          print("Tailwind stylesheet is non-empty; fixed example-selector checks skipped.")
           PYCODE
 
 
