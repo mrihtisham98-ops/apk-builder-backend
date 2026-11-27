@@ -264,14 +264,14 @@ jobs:
           from urllib.parse import urlsplit, unquote
 
           missing_references = []
-          reference_pattern = re.compile(
-              r"""(?:\b(?:src|href|poster|data)\s*=\s*["']([^"']+)["']|url\(\s*["']?([^"')]+)["']?\s*\))""",
+          css_url_pattern = re.compile(
+              r"url\(\s*(?:[\"']?)([^\"')]+)(?:[\"']?)\s*\)",
               re.IGNORECASE
           )
 
           def check_reference(owner_file, raw_reference):
               value = (raw_reference or "").strip()
-              if not value or value.startswith(("#", "//")):
+              if not value or value.startswith(("#", "//", "data:")):
                   return
               if re.match(r"^(?:[a-z][a-z0-9+.-]*:)", value, re.IGNORECASE):
                   return
@@ -293,6 +293,39 @@ jobs:
                       f"{owner_file.as_posix()} -> {value} (expected {relative})"
                   )
 
+          # Parse real HTML attributes instead of searching the entire HTML
+          # source with regex. This deliberately ignores JavaScript expressions
+          # such as ${m.img} and e.target.files[0], which are not file paths.
+          from html.parser import HTMLParser
+
+          class ProjectHTMLReferenceParser(HTMLParser):
+              def __init__(self, owner_file):
+                  super().__init__(convert_charrefs=True)
+                  self.owner_file = owner_file
+                  self.in_style = False
+
+              def handle_starttag(self, tag, attrs):
+                  if tag.lower() == "style":
+                      self.in_style = True
+                  for attr_name, attr_value in attrs:
+                      if not attr_value:
+                          continue
+                      name = (attr_name or "").lower()
+                      if name in ("src", "href", "poster"):
+                          check_reference(self.owner_file, attr_value)
+                      elif name == "style":
+                          for match in css_url_pattern.finditer(attr_value):
+                              check_reference(self.owner_file, match.group(1))
+
+              def handle_endtag(self, tag):
+                  if tag.lower() == "style":
+                      self.in_style = False
+
+              def handle_data(self, data):
+                  if self.in_style:
+                      for match in css_url_pattern.finditer(data):
+                          check_reference(self.owner_file, match.group(1))
+
           for project_file in sorted(p for p in assets.rglob("*") if p.is_file()):
               suffix = project_file.suffix.lower()
               if suffix not in (".html", ".htm", ".css"):
@@ -301,8 +334,14 @@ jobs:
                   content = project_file.read_text(encoding="utf-8", errors="replace")
               except OSError:
                   continue
-              for match in reference_pattern.finditer(content):
-                  check_reference(project_file.relative_to(assets), match.group(1) or match.group(2))
+              owner_file = project_file.relative_to(assets)
+              if suffix in (".html", ".htm"):
+                  parser = ProjectHTMLReferenceParser(owner_file)
+                  parser.feed(content)
+                  parser.close()
+              else:
+                  for match in css_url_pattern.finditer(content):
+                      check_reference(owner_file, match.group(1))
 
           if missing_references:
               print("ERROR: Missing local project references:")
