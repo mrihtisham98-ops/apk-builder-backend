@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const crypto = require('crypto');
+const zlib = require('zlib');
 const { applyAdMobIntegration } = require('../lib/admob-injector');
 // [NEW] R2 Integration ke liye AWS SDK imports
 const { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
@@ -537,85 +538,137 @@ app.post('/api/cloud-build-apk', async (req, res) => {
 });
 
 // ============================================================
-// APK BUILD STATUS
-// ORIGINAL IMPLEMENTATION PRESERVED - NO CHANGES
+// APK BUILD STATUS + GITHUB ACTIONS FAILURE DIAGNOSTICS
+// Returns the failed job/step and extracts useful text from the
+// GitHub Actions log ZIP so the editor can display it in Terminal.
 // ============================================================
+function extractGitHubLogText(zipBuffer) {
+    const buffer = Buffer.isBuffer(zipBuffer) ? zipBuffer : Buffer.from(zipBuffer || []);
+    const texts = [];
+    let eocd = -1;
+    for (let i = Math.max(0, buffer.length - 65557); i <= buffer.length - 22; i++) {
+        if (buffer.readUInt32LE(i) === 0x06054b50) eocd = i;
+    }
+    if (eocd < 0) return '';
+    const entries = buffer.readUInt16LE(eocd + 10);
+    let offset = buffer.readUInt32LE(eocd + 16);
+    for (let n = 0; n < entries && offset + 46 <= buffer.length; n++) {
+        if (buffer.readUInt32LE(offset) !== 0x02014b50) break;
+        const method = buffer.readUInt16LE(offset + 10);
+        const compressedSize = buffer.readUInt32LE(offset + 20);
+        const nameLength = buffer.readUInt16LE(offset + 28);
+        const extraLength = buffer.readUInt16LE(offset + 30);
+        const commentLength = buffer.readUInt16LE(offset + 32);
+        const localOffset = buffer.readUInt32LE(offset + 42);
+        const name = buffer.toString('utf8', offset + 46, offset + 46 + nameLength);
+        offset += 46 + nameLength + extraLength + commentLength;
+        if (!/\.txt$/i.test(name) || localOffset + 30 > buffer.length) continue;
+        if (buffer.readUInt32LE(localOffset) !== 0x04034b50) continue;
+        const localNameLength = buffer.readUInt16LE(localOffset + 26);
+        const localExtraLength = buffer.readUInt16LE(localOffset + 28);
+        const dataStart = localOffset + 30 + localNameLength + localExtraLength;
+        const compressed = buffer.subarray(dataStart, dataStart + compressedSize);
+        try {
+            const content = method === 0 ? compressed : (method === 8 ? zlib.inflateRawSync(compressed) : null);
+            if (content) texts.push(`===== ${name} =====\n${content.toString('utf8')}`);
+        } catch (_) {}
+    }
+    return texts.join('\n');
+}
+
+function selectUsefulBuildErrors(logText) {
+    const lines = String(logText || '').split(/\r?\n/);
+    const patterns = /(^|\s)(error:|error\b|fatal:|exception|failed|failure|missing:|process completed with exit code|execution failed|could not|cannot find|not found|permission denied|timed out)(\s|:|$)/i;
+    let matches = [];
+    for (let i = 0; i < lines.length; i++) {
+        if (patterns.test(lines[i])) {
+            const from = Math.max(0, i - 2);
+            const to = Math.min(lines.length, i + 4);
+            matches.push(...lines.slice(from, to));
+        }
+    }
+    const unique = [...new Set(matches)].filter(Boolean);
+    return (unique.length ? unique : lines.slice(-80)).slice(-120).join('\n').slice(-18000);
+}
 
 app.get('/api/build-status/:buildId', async (req, res) => {
     try {
         const buildId = req.params.buildId;
-
         if (!/^[a-f0-9-]{36}$/i.test(buildId)) {
-            return res.status(400).json({
-                success: false,
-                error: 'Invalid build ID.'
-            });
+            return res.status(400).json({ success: false, error: 'Invalid build ID.' });
+        }
+        if (!GITHUB_TOKEN) {
+            return res.status(500).json({ success: false, error: 'GITHUB_TOKEN is not configured.' });
         }
 
         const tag = `apk-${buildId}`;
-
         try {
-            const releaseResponse = await github.get(
-                `${API}/releases/tags/${tag}`
-            );
-
-            const apk = releaseResponse.data.assets.find(asset =>
-                asset.name.endsWith('.apk')
-            );
-
+            const releaseResponse = await github.get(`${API}/releases/tags/${tag}`);
+            const apk = releaseResponse.data.assets.find(asset => asset.name.endsWith('.apk'));
             if (apk) {
-                return res.json({
-                    success: true,
-                    status: 'completed',
-                    downloadUrl: apk.browser_download_url,
-                    fileName: apk.name
-                });
+                return res.json({ success: true, status: 'completed', downloadUrl: apk.browser_download_url, fileName: apk.name });
             }
         } catch (error) {
             if (error.response?.status !== 404) throw error;
         }
 
-        const runsResponse = await github.get(
-            `${API}/actions/runs`,
-            { params: { per_page: 100 } }
-        );
-
+        const runsResponse = await github.get(`${API}/actions/runs`, { params: { per_page: 100 } });
         const run = runsResponse.data.workflow_runs.find(item =>
-            item.display_title === `Build APK ${buildId}`
+            item.display_title === `Build APK ${buildId}` ||
+            item.name === 'Build APK' && String(item.display_title || '').includes(buildId)
         );
-
-        if (!run) {
-            return res.json({
-                success: true,
-                status: 'queued',
-                message: 'Your APK build is being prepared.'
-            });
-        }
+        if (!run) return res.json({ success: true, status: 'queued', message: 'Your APK build is being prepared.' });
 
         if (run.status !== 'completed') {
-            return res.json({
-                success: true,
-                status: 'building',
-                message: 'Your APK is being generated.'
-            });
+            return res.json({ success: true, status: 'building', message: 'Your APK is being generated.', runUrl: run.html_url });
+        }
+        if (run.conclusion === 'success') {
+            // Release creation can lag a few seconds after the workflow completes.
+            return res.json({ success: true, status: 'building', message: 'Build succeeded; APK release is being published.', runUrl: run.html_url });
+        }
+
+        let jobName = '';
+        let failedSteps = [];
+        let errorDetails = '';
+        try {
+            const jobsResponse = await github.get(`${API}/actions/runs/${run.id}/jobs`, { params: { per_page: 100 } });
+            const failedJobs = (jobsResponse.data.jobs || []).filter(job => job.conclusion === 'failure');
+            if (failedJobs.length) {
+                jobName = failedJobs[0].name || '';
+                failedSteps = (failedJobs[0].steps || [])
+                    .filter(step => step.conclusion === 'failure')
+                    .map(step => step.name || 'Unnamed step');
+                // GitHub returns the job log as a ZIP archive. Download and
+                // parse it server-side; never expose the private token to client.
+                try {
+                    const logResponse = await github.get(`${API}/actions/jobs/${failedJobs[0].id}/logs`, {
+                        responseType: 'arraybuffer',
+                        maxContentLength: 20 * 1024 * 1024,
+                        maxBodyLength: 20 * 1024 * 1024,
+                        timeout: 60000
+                    });
+                    const allLogs = extractGitHubLogText(Buffer.from(logResponse.data));
+                    errorDetails = selectUsefulBuildErrors(allLogs);
+                } catch (logError) {
+                    errorDetails = `GitHub log download unavailable: ${logError.response?.status || logError.message}`;
+                }
+            }
+        } catch (jobsError) {
+            errorDetails = `Could not retrieve failed job details: ${jobsError.response?.status || jobsError.message}`;
         }
 
         return res.json({
             success: true,
             status: 'failed',
-            message: 'APK build failed. Please check the build logs.'
+            message: 'APK build failed.',
+            runUrl: run.html_url,
+            jobName,
+            failedSteps,
+            errorDetails: errorDetails || 'GitHub Actions reported a failed workflow, but no detailed log text was available.'
         });
-
     } catch (error) {
-        console.error(
-            'BUILD STATUS ERROR:',
-            error.response?.data || error.message
-        );
-
-        return res.status(500).json({
-            success: false,
-            error: error.message
-        });
+        console.error('BUILD STATUS ERROR:', error.response?.data || error.message);
+        return res.status(500).json({ success: false, error: error.message });
     }
 });
 
