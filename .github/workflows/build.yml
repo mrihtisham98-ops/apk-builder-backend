@@ -218,24 +218,123 @@ jobs:
           assets = root / "app/src/main/assets"
           java_dir = root / "app/src/main/java" / Path(*package_name.split("."))
 
+          # Start with a clean APK assets directory, then copy the COMPLETE
+          # uploaded project tree. This is required for separate-file projects
+          # (index.html + CSS + JS + images + nested folders) as well as single
+          # HTML projects. Never copy only index.html.
+          if assets.exists():
+              shutil.rmtree(assets)
           assets.mkdir(parents=True, exist_ok=True)
           java_dir.mkdir(parents=True, exist_ok=True)
 
+          source_files = sorted(p for p in project.rglob("*") if p.is_file())
+          if not source_files:
+              raise SystemExit("ERROR: Project ZIP contains no files.")
+
           shutil.copytree(project, assets, dirs_exist_ok=True)
 
-          # Verify copied HTML project assets
+          # Verify every uploaded file (including CSS/JS and nested assets)
+          # exists in the APK assets folder with the same relative path/size.
+          missing_files = []
+          size_mismatches = []
+          for source_file in source_files:
+              relative = source_file.relative_to(project)
+              copied_file = assets / relative
+              if not copied_file.is_file():
+                  missing_files.append(relative.as_posix())
+              elif copied_file.stat().st_size != source_file.stat().st_size:
+                  size_mismatches.append(relative.as_posix())
+
+          if missing_files:
+              raise SystemExit(
+                  "ERROR: Some project files were not copied into APK assets: "
+                  + ", ".join(missing_files[:30])
+              )
+          if size_mismatches:
+              raise SystemExit(
+                  "ERROR: Project asset size mismatch after copy: "
+                  + ", ".join(size_mismatches[:30])
+              )
+
+          # Check local CSS/JS and other referenced files from HTML/CSS.
+          # A missing separate file must stop the build instead of producing
+          # an APK that silently displays unstyled or non-functional HTML.
+          import posixpath
+          import re
+          from urllib.parse import urlsplit, unquote
+
+          missing_references = []
+          reference_pattern = re.compile(
+              r"""(?:\b(?:src|href|poster|data)\s*=\s*["']([^"']+)["']|url\(\s*["']?([^"')]+)["']?\s*\))""",
+              re.IGNORECASE
+          )
+
+          def check_reference(owner_file, raw_reference):
+              value = (raw_reference or "").strip()
+              if not value or value.startswith(("#", "//")):
+                  return
+              if re.match(r"^(?:[a-z][a-z0-9+.-]*:)", value, re.IGNORECASE):
+                  return
+              parsed = urlsplit(value)
+              path = unquote(parsed.path).replace("\\", "/")
+              if not path or path.endswith("/"):
+                  return
+              if path.startswith("/"):
+                  relative = posixpath.normpath(path.lstrip("/"))
+              else:
+                  relative = posixpath.normpath(
+                      posixpath.join(owner_file.parent.as_posix(), path)
+                  )
+              if relative in ("", ".") or relative.startswith("../"):
+                  return
+              target = assets.joinpath(*relative.split("/"))
+              if not target.is_file():
+                  missing_references.append(
+                      f"{owner_file.as_posix()} -> {value} (expected {relative})"
+                  )
+
+          for project_file in sorted(p for p in assets.rglob("*") if p.is_file()):
+              suffix = project_file.suffix.lower()
+              if suffix not in (".html", ".htm", ".css"):
+                  continue
+              try:
+                  content = project_file.read_text(encoding="utf-8", errors="replace")
+              except OSError:
+                  continue
+              for match in reference_pattern.finditer(content):
+                  check_reference(project_file.relative_to(assets), match.group(1) or match.group(2))
+
+          if missing_references:
+              print("ERROR: Missing local project references:")
+              for item in missing_references[:50]:
+                  print("MISSING:", item)
+              raise SystemExit(
+                  f"ERROR: {len(missing_references)} local file reference(s) are missing. "
+                  "Make sure all CSS/JS/assets are included in the uploaded project ZIP."
+              )
+
+          # Verify copied HTML project assets and show separate-file counts.
           all_files = [p for p in assets.rglob("*") if p.is_file()]
           total_size = sum(p.stat().st_size for p in all_files)
+          css_files = [p for p in all_files if p.suffix.lower() == ".css"]
+          js_files = [p for p in all_files if p.suffix.lower() in (".js", ".mjs", ".cjs")]
 
-          print("========== ASSET VERIFICATION ==========")
+          print("========== COMPLETE PROJECT ASSET VERIFICATION ==========")
+          print("Total source files:", len(source_files))
           print("Total files copied:", len(all_files))
+          print("CSS files copied:", len(css_files))
+          print("JavaScript files copied:", len(js_files))
           print("Total asset size:", round(total_size / (1024 * 1024), 2), "MB")
           print("Index HTML exists:", (assets / "index.html").is_file())
-
-          for file in all_files[:50]:
-              print("ASSET:", file.relative_to(assets))
-
-          print("========================================")
+          for file in all_files[:100]:
+              print("APK ASSET:", file.relative_to(assets))
+          if len(all_files) != len(source_files):
+              raise SystemExit(
+                  f"ERROR: Source file count ({len(source_files)}) does not match "
+                  f"APK asset count ({len(all_files)})."
+              )
+          print("SUCCESS: All uploaded project files are present in APK assets.")
+          print("==========================================================")
 
           # Create Android manifest.
           android_ns = "http://schemas.android.com/apk/res/android"
