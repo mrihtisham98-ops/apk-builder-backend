@@ -21,6 +21,151 @@ jobs:
           ref: ${{ github.event.client_payload.ref || github.event.repository.default_branch }}
           path: source
 
+      # ============================================================
+      # R2 BUILD INPUT — download the uploaded ZIP and create the
+      # same folder structure used by the legacy Git-branch builds.
+      # ============================================================
+      - name: Download and Prepare R2 Build Input
+        if: ${{ github.event.client_payload.source == 'r2' }}
+        env:
+          BUILD_ID: ${{ github.event.client_payload.buildId }}
+          DOWNLOAD_URL: ${{ github.event.client_payload.downloadUrl }}
+          CONFIG_JSON: ${{ toJson(github.event.client_payload.config) }}
+        run: |
+          python3 - <<'PY'
+          import io
+          import json
+          import os
+          import shutil
+          import urllib.request
+          import zipfile
+          from pathlib import Path, PurePosixPath
+
+          build_id = os.environ.get("BUILD_ID", "").strip()
+          download_url = os.environ.get("DOWNLOAD_URL", "").strip()
+          config_json = os.environ.get("CONFIG_JSON", "").strip()
+
+          if not build_id:
+              raise SystemExit("ERROR: R2 buildId is missing.")
+          if not download_url:
+              raise SystemExit("ERROR: R2 downloadUrl is missing.")
+          if not config_json:
+              raise SystemExit("ERROR: R2 build config payload is missing.")
+
+          try:
+              config = json.loads(config_json)
+          except json.JSONDecodeError as error:
+              raise SystemExit("ERROR: Invalid build config JSON: " + str(error))
+
+          if not isinstance(config, dict):
+              raise SystemExit("ERROR: Build config must be a JSON object.")
+
+          source_dir = Path("source/.build-input") / build_id
+          project_dir = source_dir / "project"
+          source_dir.mkdir(parents=True, exist_ok=True)
+
+          print("Downloading project ZIP from Cloudflare R2...")
+          request = urllib.request.Request(
+              download_url,
+              headers={"User-Agent": "Web-App-Studio-APK-Builder"}
+          )
+          with urllib.request.urlopen(request, timeout=180) as response:
+              zip_bytes = response.read()
+
+          if not zip_bytes:
+              raise SystemExit("ERROR: Downloaded R2 ZIP is empty.")
+
+          print("Downloaded ZIP bytes:", len(zip_bytes))
+
+          project_dir.mkdir(parents=True, exist_ok=True)
+
+          try:
+              archive = zipfile.ZipFile(io.BytesIO(zip_bytes))
+          except zipfile.BadZipFile:
+              raise SystemExit("ERROR: R2 file is not a valid ZIP archive.")
+
+          with archive:
+              file_names = [
+                  name for name in archive.namelist()
+                  if name and not name.endswith("/")
+              ]
+
+              # Support both ZIP layouts:
+              # 1) index.html at ZIP root
+              # 2) one enclosing folder such as project/index.html
+              prefix = ""
+              if "index.html" not in file_names:
+                  index_candidates = [
+                      name[:-len("index.html")]
+                      for name in file_names
+                      if name.endswith("/index.html")
+                  ]
+                  if len(index_candidates) == 1:
+                      prefix = index_candidates[0]
+                  else:
+                      raise SystemExit(
+                          "ERROR: ZIP must contain a root index.html "
+                          "or one folder containing index.html."
+                      )
+
+              extracted = 0
+              for member in archive.infolist():
+                  if member.is_dir():
+                      continue
+
+                  raw_name = member.filename
+                  if prefix:
+                      if not raw_name.startswith(prefix):
+                          continue
+                      raw_name = raw_name[len(prefix):]
+
+                  relative = PurePosixPath(raw_name)
+                  if (
+                      not raw_name
+                      or relative.is_absolute()
+                      or ".." in relative.parts
+                      or "\\" in raw_name
+                  ):
+                      raise SystemExit(
+                          "ERROR: Unsafe file path inside ZIP: " + member.filename
+                      )
+
+                  destination = project_dir.joinpath(*relative.parts)
+                  destination.parent.mkdir(parents=True, exist_ok=True)
+
+                  with archive.open(member) as source_file, destination.open("wb") as target_file:
+                      shutil.copyfileobj(source_file, target_file)
+
+                  extracted += 1
+
+          if not (project_dir / "index.html").is_file():
+              raise SystemExit("ERROR: ZIP extraction did not produce project/index.html.")
+
+          build_config = {
+              "buildId": build_id,
+              "appName": str(config.get("appName") or "App")[:60],
+              "packageName": config.get("packageName") or "com.example.app",
+              "iconPath": config.get("iconPath")
+          }
+
+          (source_dir / "build-config.json").write_text(
+              json.dumps(build_config, ensure_ascii=False, indent=2),
+              encoding="utf-8"
+          )
+
+          admob_config = config.get("adMob")
+          if isinstance(admob_config, dict):
+              (project_dir / "admob.config.json").write_text(
+                  json.dumps(admob_config, ensure_ascii=False, indent=2),
+                  encoding="utf-8"
+              )
+
+          print("R2 project files extracted:", extracted)
+          print("Build config created:", source_dir / "build-config.json")
+          print("Project index exists:", (project_dir / "index.html").is_file())
+          print("R2 build input preparation completed.")
+          PY
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
