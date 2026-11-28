@@ -859,9 +859,6 @@ jobs:
               path.join(assetsDir, "**/*.ts"),
               path.join(assetsDir, "**/*.tsx")
             ],
-            // Preserve each app's own button, input, and browser-native styling.
-            // Tailwind utilities remain available; only the global Preflight reset is disabled.
-            corePlugins: { preflight: false },
             theme: { extend: {} },
             plugins: []
           };
@@ -1687,222 +1684,99 @@ jobs:
       # locally. The user-supplied index.html remains unchanged in
       # the repository; only the APK assets copy is updated here.
       # ============================================================
-      - name: Bundle Font Awesome CSS and Fonts Locally
+      - name: Embed Font Awesome CSS and Fonts Directly into APK HTML
         run: |
           set -euo pipefail
-          python3 - <<'PY'
+          python3 - <<'PYFA'
           from pathlib import Path
-          from urllib.parse import urljoin, urlsplit, unquote
+          from urllib.parse import urljoin
           from urllib.request import Request, urlopen
           from html import unescape
+          import base64
+          import mimetypes
           import re
 
           ASSETS = Path("myapp/app/src/main/assets")
           INDEX = ASSETS / "index.html"
           CSS_URL = "https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"
-          CSS_PATH = ASSETS / "_offline_vendor/fontawesome/css/all.min.css"
-          FONT_DIR = ASSETS / "_offline_vendor/fontawesome/webfonts"
-
           if not INDEX.is_file():
-              raise SystemExit("ERROR: APK index.html is missing before Font Awesome bundling.")
+              raise SystemExit("ERROR: APK index.html is missing before Font Awesome embedding.")
 
           headers = {
               "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
               "Accept": "text/css,*/*;q=0.8",
               "Accept-Encoding": "identity",
           }
-
           def download(url):
-              request = Request(url, headers=headers)
-              with urlopen(request, timeout=45) as response:
-                  return response.read(), response.headers.get("Content-Type", "")
+              req = Request(url, headers=headers)
+              with urlopen(req, timeout=45) as response:
+                  data = response.read()
+              if not data:
+                  raise RuntimeError("Empty download: " + url)
+              return data
 
-          print("Downloading Font Awesome 6.4.0 stylesheet...")
-          try:
-              css_bytes, content_type = download(CSS_URL)
-          except Exception as exc:
-              raise SystemExit("ERROR: Could not download Font Awesome CSS: " + str(exc))
+          print("Downloading Font Awesome 6.4.0 CSS...")
+          css_bytes = download(CSS_URL)
+          css = css_bytes.decode("utf-8", errors="replace")
+          if "font awesome" not in css.lower() or ".fa-solid" not in css:
+              raise SystemExit("ERROR: Downloaded stylesheet is not valid Font Awesome 6 CSS.")
 
-          try:
-              css_text = css_bytes.decode("utf-8")
-          except UnicodeDecodeError:
-              css_text = css_bytes.decode("latin-1")
-
-          if "Font Awesome" not in css_text and "fontawesome" not in css_text.lower():
-              raise SystemExit("ERROR: Downloaded stylesheet does not look like Font Awesome CSS.")
-
-          FONT_URL_RE = re.compile(
-              r"""url\(\s*(?P<quote>["']?)(?P<url>[^)'"]+)(?P=quote)\s*\)""",
-              re.IGNORECASE,
-          )
-          allowed_exts = {".woff2", ".woff", ".ttf", ".otf", ".eot"}
-          downloaded = {}
-
-          FONT_DIR.mkdir(parents=True, exist_ok=True)
-          for match in FONT_URL_RE.finditer(css_text):
-              raw_url = match.group("url").strip()
-              if not raw_url or raw_url.startswith("data:"):
-                  continue
-
-              absolute_url = urljoin(CSS_URL, raw_url)
-              ext = Path(urlsplit(absolute_url).path).suffix.lower()
-              if ext not in allowed_exts:
-                  continue
-
-              if absolute_url in downloaded:
-                  continue
-
-              filename = unquote(Path(urlsplit(absolute_url).path).name)
-              if not filename:
-                  continue
-
-              try:
-                  data, _mime = download(absolute_url)
-                  if not data:
-                      raise RuntimeError("empty response")
-                  destination = FONT_DIR / filename
-                  destination.write_bytes(data)
-                  downloaded[absolute_url] = filename
-                  print("Downloaded font:", filename, len(data), "bytes")
-              except Exception as exc:
-                  print("WARNING: Font download failed:", absolute_url, str(exc))
-
-          woff2_count = sum(1 for name in downloaded.values() if name.lower().endswith(".woff2"))
-          if woff2_count == 0:
-              raise SystemExit(
-                  "ERROR: Font Awesome stylesheet downloaded, but no .woff2 font could be saved."
-              )
-
-          def rewrite_font_url(match):
-              raw_url = match.group("url").strip()
-              absolute_url = urljoin(CSS_URL, raw_url)
-              filename = downloaded.get(absolute_url)
-              if not filename:
+          url_re = re.compile(r"url\(\s*(?P<q>[\"\']?)(?P<url>[^)\"\']+)(?P=q)\s*\)", re.I)
+          embedded = {}
+          def inline_font(match):
+              raw = match.group("url").strip()
+              if raw.startswith("data:"):
                   return match.group(0)
-              return 'url("../webfonts/' + filename + '")'
+              absolute = urljoin(CSS_URL, raw)
+              if absolute not in embedded:
+                  data = download(absolute)
+                  path = absolute.split("?", 1)[0].lower()
+                  if path.endswith(".woff2"):
+                      mime = "font/woff2"
+                  elif path.endswith(".woff"):
+                      mime = "font/woff"
+                  elif path.endswith(".ttf"):
+                      mime = "font/ttf"
+                  elif path.endswith(".otf"):
+                      mime = "font/otf"
+                  elif path.endswith(".eot"):
+                      mime = "application/vnd.ms-fontobject"
+                  else:
+                      return match.group(0)
+                  embedded[absolute] = "data:" + mime + ";base64," + base64.b64encode(data).decode("ascii")
+                  print("Embedded font:", path.rsplit("/", 1)[-1], len(data), "bytes")
+              return 'url("' + embedded[absolute] + '")'
 
-          css_text = FONT_URL_RE.sub(rewrite_font_url, css_text)
-          CSS_PATH.parent.mkdir(parents=True, exist_ok=True)
-          CSS_PATH.write_text(css_text, encoding="utf-8")
+          css = url_re.sub(inline_font, css)
+          if "data:font/woff2;base64," not in css:
+              raise SystemExit("ERROR: Font Awesome WOFF2 font was not embedded.")
 
           html = INDEX.read_text(encoding="utf-8")
-
-          def replace_fontawesome_link(match):
-              tag = match.group(0)
-              href_match = re.search(r'\bhref\s*=\s*(["\'])(.*?)\1', tag, re.IGNORECASE)
-              if not href_match:
+          head_match = re.search(r"(<head\b[^>]*>)([\s\S]*?)(</head\s*>)", html, re.I)
+          if not head_match:
+              raise SystemExit("ERROR: HTML head element not found; cannot safely inline Font Awesome.")
+          head_open, head_content, head_close = head_match.groups()
+          # Remove Font Awesome stylesheet links from the real document head only.
+          link_re = re.compile(r"<link\b[^>]*>", re.I)
+          def keep_or_remove(tag):
+              href = re.search(r"\bhref\s*=\s*([\"'])(.*?)\1", tag, re.I)
+              if not href:
                   return tag
-
-              href = unescape(href_match.group(2))
-              is_fa_link = "font-awesome" in href.lower() or "fontawesome" in href.lower()
-
-              # Also recognize a CSS file that the earlier offline bundler
-              # already downloaded and rewrote to a local path.
-              if not is_fa_link and not href.lower().startswith(("http://", "https://", "data:")):
-                  candidate = (ASSETS / href).resolve()
-                  try:
-                      if candidate.is_file():
-                          existing_css = candidate.read_text(encoding="utf-8", errors="ignore")
-                          is_fa_link = "Font Awesome" in existing_css or "fontawesome" in existing_css.lower()
-                  except Exception:
-                      pass
-
-              if not is_fa_link:
-                  return tag
-
-              return (
-                  tag[:href_match.start(2)]
-                  + "_offline_vendor/fontawesome/css/all.min.css"
-                  + tag[href_match.end(2):]
-              )
-
-          link_tag_re = re.compile(r"<link\b[^>]*>", re.IGNORECASE)
-          html, replaced_links = link_tag_re.subn(replace_fontawesome_link, html)
-
-          if replaced_links == 0:
-              local_link = '<link rel="stylesheet" href="_offline_vendor/fontawesome/css/all.min.css">'
-              if re.search(r"</head\s*>", html, re.IGNORECASE):
-                  html = re.sub(r"</head\s*>", local_link + "\n</head>", html, count=1, flags=re.IGNORECASE)
-              else:
-                  html = local_link + "\n" + html
-
+              value = unescape(href.group(2)).lower()
+              if "font-awesome" in value or "fontawesome" in value or "all.min.css" in value and "cdnjs.cloudflare.com/ajax/libs/font-awesome" in value:
+                  return ""
+              return tag
+          head_content = link_re.sub(keep_or_remove, head_content)
+          style = "\n<style id=\"was-fontawesome-embedded\">\n" + css + "\n</style>\n"
+          # Replace an earlier injected copy if this workflow is rerun on the same assets.
+          head_content = re.sub(r"<style\b[^>]*id=[\"']was-fontawesome-embedded[\"'][^>]*>[\s\S]*?</style\s*>", "", head_content, flags=re.I)
+          new_head = head_open + head_content + style + head_close
+          html = html[:head_match.start()] + new_head + html[head_match.end():]
           INDEX.write_text(html, encoding="utf-8")
-
-          saved_fonts = list(FONT_DIR.glob("*"))
-          print("Font Awesome stylesheet:", CSS_PATH)
-          print("Font Awesome local font files:", len(saved_fonts))
-          print("Font Awesome links updated:", replaced_links)
-          print("SUCCESS: Font Awesome CSS and WOFF2 fonts are packaged locally.")
-          PY
-
-      # ============================================================
-      # PACKAGE LUCIDE LOCALLY FOR APK BUILDS
-      # Native Web Preview injects Lucide for every project. Without
-      # the same library in the APK, data-lucide icons (menu, share,
-      # send, etc.) remain empty even though the preview displays them.
-      # Download the same browser bundle and load it before app scripts.
-      # This changes only the generated APK copy, never source HTML.
-      # ============================================================
-      - name: Bundle Lucide Icons Locally for WebView
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          from urllib.request import Request, urlopen
-          import re
-
-          assets = Path("myapp/app/src/main/assets")
-          index = assets / "index.html"
-          lucide_dir = assets / "_offline_vendor/lucide"
-          lucide_file = lucide_dir / "lucide.min.js"
-
-          if not index.is_file():
-              raise SystemExit("ERROR: APK index.html is missing before Lucide setup.")
-
-          lucide_dir.mkdir(parents=True, exist_ok=True)
-          url = "https://unpkg.com/lucide@latest"
-          request = Request(url, headers={
-              "User-Agent": "Mozilla/5.0 Web-App-Studio-APK-Builder",
-              "Accept": "application/javascript,*/*;q=0.8",
-          })
-          print("Downloading the same Lucide browser bundle used by Native Web Preview...")
-          with urlopen(request, timeout=60) as response:
-              data = response.read(15 * 1024 * 1024 + 1)
-          if not data or len(data) > 15 * 1024 * 1024:
-              raise SystemExit("ERROR: Lucide browser bundle is empty or exceeds 15 MB.")
-          lucide_file.write_bytes(data)
-
-          html = index.read_text(encoding="utf-8")
-          local_src = "_offline_vendor/lucide/lucide.min.js"
-          script_tag = '<script src="' + local_src + '"></script>'
-
-          # If the app already provides Lucide itself, do not load a second copy.
-          has_lucide = re.search(
-              r'<script\b[^>]*\bsrc\s*=\s*["\'][^"\']*lucide[^"\']*["\'][^>]*>',
-              html,
-              re.IGNORECASE,
-          )
-          if not has_lucide and local_src not in html:
-              head_match = re.search(r'<head\b[^>]*>', html, re.IGNORECASE)
-              if head_match:
-                  pos = head_match.end()
-                  html = html[:pos] + "\n" + script_tag + "\n" + html[pos:]
-              else:
-                  html = script_tag + "\n" + html
-              index.write_text(html, encoding="utf-8")
-              print("SUCCESS: Local Lucide script inserted before app scripts.")
-          else:
-              print("INFO: App already references Lucide; no duplicate script inserted.")
-
-          # Verify the packaged file and local script reference.
-          if not lucide_file.is_file() or lucide_file.stat().st_size == 0:
-              raise SystemExit("ERROR: Local Lucide JavaScript file is missing.")
-          final_html = index.read_text(encoding="utf-8")
-          if local_src not in final_html and not has_lucide:
-              raise SystemExit("ERROR: Local Lucide script reference was not written.")
-          print("Lucide bundle bytes:", lucide_file.stat().st_size)
-          print("SUCCESS: APK has an offline Lucide icon runtime.")
-          PY
+          print("Font Awesome CSS bytes embedded:", len(css.encode("utf-8")))
+          print("Font files embedded as data URLs:", len(embedded))
+          print("SUCCESS: Font Awesome CSS and font data are embedded directly in APK index.html.")
+          PYFA
 
       - name: Verify Critical Offline Assets
         run: |
@@ -1937,22 +1811,26 @@ jobs:
 
           echo "=== Font files (.woff2 / .woff / .ttf) ==="
           WOFF_COUNT=$(find "$ASSETS" \( -name "*.woff2" -o -name "*.woff" -o -name "*.ttf" \) 2>/dev/null | wc -l)
-          echo "Font files found: $WOFF_COUNT"
-          if [ "$WOFF_COUNT" -lt 1 ]; then
-            echo "ERROR: No font files in APK assets — icons will be invisible."
-            echo "Check that _bundled/ or _offline_vendor/ contains font files."
-            echo "Aborting build."
+          EMBEDDED_FONT_COUNT=$(grep -o "data:font/woff2;base64," "$ASSETS/index.html" | wc -l || true)
+          echo "Standalone font files found: $WOFF_COUNT"
+          echo "Embedded WOFF2 fonts found: $EMBEDDED_FONT_COUNT"
+          if [ "$WOFF_COUNT" -lt 1 ] && [ "$EMBEDDED_FONT_COUNT" -lt 1 ]; then
+            echo "ERROR: No standalone or embedded font files in APK assets — icons may be invisible."
             exit 1
           fi
 
           echo "=== Font Awesome CSS sanity check ==="
-          FA_CSS=$(find "$ASSETS" -name "*.css" 2>/dev/null | xargs grep -l "font-family.*Font Awesome" 2>/dev/null | head -1 || true)
-          if [ -z "$FA_CSS" ]; then
-            echo "WARNING: No Font Awesome CSS detected in APK assets."
-            echo "Icons may still be visible if CSS is inlined, but check the report."
-          else
-            echo "Font Awesome CSS: $FA_CSS"
-          fi
+          python3 - <<'PYFAVERIFY'
+          from pathlib import Path
+          html = Path("myapp/app/src/main/assets/index.html").read_text(encoding="utf-8")
+          if 'id="was-fontawesome-embedded"' not in html:
+              raise SystemExit("ERROR: Embedded Font Awesome stylesheet is missing from APK index.html.")
+          if '.fa-solid' not in html or 'Font Awesome 6 Free' not in html:
+              raise SystemExit("ERROR: Embedded Font Awesome selectors/font-face are incomplete.")
+          if 'data:font/woff2;base64,' not in html:
+              raise SystemExit("ERROR: Embedded Font Awesome WOFF2 data is missing.")
+          print("Font Awesome CSS + WOFF2 embedded: OK")
+          PYFAVERIFY
 
           echo "=== All local asset references in index.html ==="
           grep -oE '(src|href)="[^"]*"' "$ASSETS/index.html" | grep -vE '^(src|href)="https?://' | head -20 || true
@@ -2102,7 +1980,6 @@ jobs:
               scripts.forEach(function (v) { add('SCRIPT: ' + v); });
               add('Styles found: ' + styles.length);
               styles.forEach(function (v) { add('STYLE: ' + v); });
-              add('toggleMainDrawerMenu: ' + (typeof window.toggleMainDrawerMenu));
               add('Font Awesome CSS rules detected: ' + (function () {
                 try {
                   var found = false;
@@ -2124,7 +2001,6 @@ jobs:
               button.onclick = showPanel;
               document.body.appendChild(button);
               window.setTimeout(function () {
-                add('Delayed check: toggleMainDrawerMenu=' + (typeof window.toggleMainDrawerMenu));
                 add('Font Awesome test glyph computed font=' + (function () {
                   var el = document.createElement('i');
                   el.className = 'fa-solid fa-bars';
