@@ -860,6 +860,11 @@ jobs:
               path.join(assetsDir, "**/*.tsx")
             ],
             theme: { extend: {} },
+            // Keep Tailwind utility classes, but disable Preflight's global
+            // element reset. Preflight was overriding app-authored button
+            // backgrounds, borders, radius and native form-control styling
+            // in generated Android WebView APKs.
+            corePlugins: { preflight: false },
             plugins: []
           };
           JS
