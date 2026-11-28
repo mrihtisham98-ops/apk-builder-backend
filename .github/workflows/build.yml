@@ -30,6 +30,7 @@ jobs:
         env:
           BUILD_ID: ${{ github.event.client_payload.buildId }}
           DOWNLOAD_URL: ${{ github.event.client_payload.downloadUrl }}
+          ICON_DOWNLOAD_URL: ${{ github.event.client_payload.iconDownloadUrl }}
           CONFIG_JSON: ${{ toJson(github.event.client_payload.config) }}
         run: |
           python3 - <<'PY'
@@ -141,11 +142,34 @@ jobs:
           if not (project_dir / "index.html").is_file():
               raise SystemExit("ERROR: ZIP extraction did not produce project/index.html.")
 
+          # Download the separately uploaded launcher icon when one was
+          # selected in the Studio. Keep it outside project/ so the existing
+          # Android icon detector can resolve the configured iconPath.
+          icon_download_url = os.environ.get("ICON_DOWNLOAD_URL", "").strip()
+          icon_path = config.get("iconPath")
+          if icon_download_url:
+              if not isinstance(icon_path, str) or not icon_path.startswith("app-icon."):
+                  raise SystemExit("ERROR: R2 icon URL was provided without a valid iconPath.")
+              icon_destination = source_dir / icon_path
+              print("Downloading custom launcher icon from Cloudflare R2...")
+              icon_request = urllib.request.Request(
+                  icon_download_url,
+                  headers={"User-Agent": "Web-App-Studio-APK-Builder"}
+              )
+              with urllib.request.urlopen(icon_request, timeout=60) as response:
+                  icon_bytes = response.read(10 * 1024 * 1024 + 1)
+              if not icon_bytes or len(icon_bytes) > 10 * 1024 * 1024:
+                  raise SystemExit("ERROR: R2 launcher icon is empty or exceeds 10 MB.")
+              icon_destination.write_bytes(icon_bytes)
+              print("R2 launcher icon downloaded:", icon_destination, len(icon_bytes), "bytes")
+          elif icon_path:
+              raise SystemExit("ERROR: Icon path was configured but no R2 icon download URL was provided.")
+
           build_config = {
               "buildId": build_id,
               "appName": str(config.get("appName") or "App")[:60],
               "packageName": config.get("packageName") or "com.example.app",
-              "iconPath": config.get("iconPath")
+              "iconPath": icon_path
           }
 
           (source_dir / "build-config.json").write_text(
@@ -439,91 +463,77 @@ jobs:
 
           icon_file = None
 
-          # 1. First try the exact iconPath from build-config.json.
+          # 1. Try the configured path in both the build root and project root.
+          # R2 icon downloads are normally placed beside build-config.json,
+          # but older/alternate packaging flows may place the icon in project/.
           if icon_path and isinstance(icon_path, str):
-              configured_file = (source / icon_path).resolve()
+              configured_candidates = [
+                  (source / icon_path).resolve(),
+                  (project / icon_path).resolve(),
+                  (project / Path(icon_path).name).resolve()
+              ]
               source_resolved = source.resolve()
+              for configured_file in configured_candidates:
+                  try:
+                      configured_file.relative_to(source_resolved)
+                  except ValueError:
+                      raise SystemExit("ERROR: Icon path is outside build directory.")
+                  if configured_file.is_file() and configured_file.suffix.lower() in supported_extensions:
+                      icon_file = configured_file
+                      print("Icon found using configured path:", icon_file)
+                      break
+                  else:
+                      print("Configured icon candidate not found:", configured_file)
 
-              try:
-                  configured_file.relative_to(source_resolved)
-              except ValueError:
-                  raise SystemExit(
-                      "ERROR: Icon path is outside build directory."
-                  )
-
-              if configured_file.is_file():
-                  icon_file = configured_file
-                  print("Icon found using iconPath:", icon_file)
-
-              else:
-                  print("Configured iconPath file not found.")
-
-          # 2. Search common icon filenames if iconPath is missing.
+          # 2. Search standard icon names in both locations.
           if icon_file is None:
               preferred_names = [
-                  "app-icon.png",
-                  "app-icon.jpg",
-                  "app-icon.jpeg",
-                  "app-icon.webp",
-                  "app_icon.png",
-                  "app_icon.jpg",
-                  "icon.png",
-                  "icon.jpg",
-                  "icon.jpeg",
-                  "icon.webp",
-                  "launcher.png",
-                  "launcher.jpg",
-                  "launcher.webp"
+                  "app-icon.png", "app-icon.jpg", "app-icon.jpeg", "app-icon.webp",
+                  "app_icon.png", "app_icon.jpg", "icon.png", "icon.jpg",
+                  "icon.jpeg", "icon.webp", "launcher.png", "launcher.jpg",
+                  "launcher.webp", "logo.png", "logo.jpg", "logo.jpeg", "logo.webp"
               ]
-
-              for filename in preferred_names:
-                  candidate = source / filename
-
-                  if candidate.is_file():
-                      icon_file = candidate
-                      print("Icon found using filename:", candidate)
+              search_roots = [source, project]
+              for search_root in search_roots:
+                  for filename in preferred_names:
+                      candidate = search_root / filename
+                      if candidate.is_file():
+                          icon_file = candidate
+                          print("Icon found by standard filename:", candidate)
+                          break
+                  if icon_file is not None:
                       break
 
-          # 3. Search uploaded image files outside the project folder.
+          # 3. Last-resort image discovery across the complete build input,
+          # including project/. Prefer a unique icon/logo/launcher-named image.
           if icon_file is None:
               image_candidates = []
-
               for candidate in source.rglob("*"):
-                  if not candidate.is_file():
+                  if not candidate.is_file() or candidate.name == "build-config.json":
                       continue
-
-                  if "project" in candidate.relative_to(source).parts:
-                      continue
-
-                  if candidate.name == "build-config.json":
-                      continue
-
                   if candidate.suffix.lower() in supported_extensions:
                       image_candidates.append(candidate)
 
               named_candidates = [
                   item for item in image_candidates
-                  if "icon" in item.stem.lower()
-                  or "launcher" in item.stem.lower()
-                  or "logo" in item.stem.lower()
+                  if any(token in item.stem.lower() for token in ("icon", "launcher", "logo"))
               ]
+              print("Image candidates found:", [p.relative_to(source).as_posix() for p in image_candidates[:50]])
 
               if len(named_candidates) == 1:
                   icon_file = named_candidates[0]
-
               elif len(image_candidates) == 1:
                   icon_file = image_candidates[0]
-
               elif len(named_candidates) > 1:
                   raise SystemExit(
-                      "ERROR: Multiple possible icon images found. "
-                      "Please provide a clear iconPath in build-config.json."
+                      "ERROR: Multiple possible icon images found: "
+                      + ", ".join(p.relative_to(source).as_posix() for p in named_candidates[:20])
+                      + ". Keep one clearly named app icon or set iconPath correctly."
                   )
-
               elif len(image_candidates) > 1:
                   raise SystemExit(
-                      "ERROR: Multiple images found and no clear app icon "
-                      "could be identified."
+                      "ERROR: Multiple images found and no clear app icon could be identified. "
+                      "Set iconPath to the intended logo image."
                   )
 
           icon_enabled = False
