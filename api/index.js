@@ -201,7 +201,7 @@ app.post('/api/r2-upload-url', async (req, res) => {
 
 app.post('/api/r2-upload-complete', async (req, res) => {
     try {
-        const { buildId, fileKey, appName, packageName, adMob } = req.body;
+        const { buildId, fileKey, appName, packageName, adMob, appIcon } = req.body;
 
         if (!buildId || !fileKey) {
             return res.status(400).json({ success: false, error: 'buildId and fileKey are required' });
@@ -239,8 +239,51 @@ app.post('/api/r2-upload-complete', async (req, res) => {
             appName: String(appName || 'App').slice(0, 60),
             packageName: packageName || 'com.example.app',
             adMob: adMob || { enabled: false },
-            r2ZipKey: fileKey
+            r2ZipKey: fileKey,
+            iconPath: null
         };
+
+        // Upload the selected launcher icon separately to R2. The icon is
+        // intentionally not placed in the GitHub dispatch payload because
+        // GitHub repository_dispatch payloads have a small size limit.
+        let iconDownloadUrl = null;
+        if (appIcon && typeof appIcon === 'string') {
+            const iconMatch = appIcon.match(/^data:image\/(png|jpeg|jpg|webp);base64,([A-Za-z0-9+/=]+)$/);
+            if (!iconMatch) {
+                return res.status(400).json({
+                    success: false,
+                    error: 'App icon must be a valid PNG, JPG or WebP data URL.'
+                });
+            }
+
+            const iconBuffer = Buffer.from(iconMatch[2], 'base64');
+            if (!iconBuffer.length || iconBuffer.length > 10 * 1024 * 1024) {
+                return res.status(400).json({
+                    success: false,
+                    error: 'App icon must be between 1 byte and 10 MB.'
+                });
+            }
+
+            const extension = iconMatch[1] === 'jpeg' ? 'jpg' : iconMatch[1];
+            const iconKey = `icons/${buildId}/app-icon.${extension}`;
+            await r2Client.send(new PutObjectCommand({
+                Bucket: process.env.R2_BUCKET_NAME,
+                Key: iconKey,
+                Body: iconBuffer,
+                ContentType: `image/${iconMatch[1] === 'jpg' ? 'jpeg' : iconMatch[1]}`
+            }));
+
+            const iconCommand = new GetObjectCommand({
+                Bucket: process.env.R2_BUCKET_NAME,
+                Key: iconKey
+            });
+            iconDownloadUrl = await getSignedUrl(
+                r2Client,
+                iconCommand,
+                { expiresIn: 3600 }
+            );
+            config.iconPath = `app-icon.${extension}`;
+        }
 
         // GitHub Actions cannot access Vercel environment variables.
         // Create a temporary signed GET URL so the workflow can fetch
@@ -263,6 +306,7 @@ app.post('/api/r2-upload-complete', async (req, res) => {
                 config,
                 fileKey,
                 downloadUrl,
+                iconDownloadUrl,
                 source: 'r2'
             }
         });
@@ -2476,4 +2520,4 @@ Do not assume files or code exist unless they are provided.
 // FINAL EXPORT
 // ============================================================
 
-module.exports = app;     
+module.exports = app;
