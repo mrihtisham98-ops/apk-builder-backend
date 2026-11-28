@@ -859,12 +859,10 @@ jobs:
               path.join(assetsDir, "**/*.ts"),
               path.join(assetsDir, "**/*.tsx")
             ],
-            theme: { extend: {} },
-            // Keep Tailwind utility classes, but disable Preflight's global
-            // element reset. Preflight was overriding app-authored button
-            // backgrounds, borders, radius and native form-control styling
-            // in generated Android WebView APKs.
+            // Preserve each app's own button, input, and browser-native styling.
+            // Tailwind utilities remain available; only the global Preflight reset is disabled.
             corePlugins: { preflight: false },
+            theme: { extend: {} },
             plugins: []
           };
           JS
@@ -1835,6 +1833,75 @@ jobs:
           print("Font Awesome local font files:", len(saved_fonts))
           print("Font Awesome links updated:", replaced_links)
           print("SUCCESS: Font Awesome CSS and WOFF2 fonts are packaged locally.")
+          PY
+
+      # ============================================================
+      # PACKAGE LUCIDE LOCALLY FOR APK BUILDS
+      # Native Web Preview injects Lucide for every project. Without
+      # the same library in the APK, data-lucide icons (menu, share,
+      # send, etc.) remain empty even though the preview displays them.
+      # Download the same browser bundle and load it before app scripts.
+      # This changes only the generated APK copy, never source HTML.
+      # ============================================================
+      - name: Bundle Lucide Icons Locally for WebView
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          from urllib.request import Request, urlopen
+          import re
+
+          assets = Path("myapp/app/src/main/assets")
+          index = assets / "index.html"
+          lucide_dir = assets / "_offline_vendor/lucide"
+          lucide_file = lucide_dir / "lucide.min.js"
+
+          if not index.is_file():
+              raise SystemExit("ERROR: APK index.html is missing before Lucide setup.")
+
+          lucide_dir.mkdir(parents=True, exist_ok=True)
+          url = "https://unpkg.com/lucide@latest"
+          request = Request(url, headers={
+              "User-Agent": "Mozilla/5.0 Web-App-Studio-APK-Builder",
+              "Accept": "application/javascript,*/*;q=0.8",
+          })
+          print("Downloading the same Lucide browser bundle used by Native Web Preview...")
+          with urlopen(request, timeout=60) as response:
+              data = response.read(15 * 1024 * 1024 + 1)
+          if not data or len(data) > 15 * 1024 * 1024:
+              raise SystemExit("ERROR: Lucide browser bundle is empty or exceeds 15 MB.")
+          lucide_file.write_bytes(data)
+
+          html = index.read_text(encoding="utf-8")
+          local_src = "_offline_vendor/lucide/lucide.min.js"
+          script_tag = '<script src="' + local_src + '"></script>'
+
+          # If the app already provides Lucide itself, do not load a second copy.
+          has_lucide = re.search(
+              r'<script\b[^>]*\bsrc\s*=\s*["\'][^"\']*lucide[^"\']*["\'][^>]*>',
+              html,
+              re.IGNORECASE,
+          )
+          if not has_lucide and local_src not in html:
+              head_match = re.search(r'<head\b[^>]*>', html, re.IGNORECASE)
+              if head_match:
+                  pos = head_match.end()
+                  html = html[:pos] + "\n" + script_tag + "\n" + html[pos:]
+              else:
+                  html = script_tag + "\n" + html
+              index.write_text(html, encoding="utf-8")
+              print("SUCCESS: Local Lucide script inserted before app scripts.")
+          else:
+              print("INFO: App already references Lucide; no duplicate script inserted.")
+
+          # Verify the packaged file and local script reference.
+          if not lucide_file.is_file() or lucide_file.stat().st_size == 0:
+              raise SystemExit("ERROR: Local Lucide JavaScript file is missing.")
+          final_html = index.read_text(encoding="utf-8")
+          if local_src not in final_html and not has_lucide:
+              raise SystemExit("ERROR: Local Lucide script reference was not written.")
+          print("Lucide bundle bytes:", lucide_file.stat().st_size)
+          print("SUCCESS: APK has an offline Lucide icon runtime.")
           PY
 
       - name: Verify Critical Offline Assets
